@@ -1,0 +1,1965 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Avatar Mocap Studio — Libras (upper body + dedos)</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height:100%; margin:0; }
+  body { display:flex; flex-direction:column; font-family: system-ui, sans-serif; background:#111; color:#eee; }
+  #ui { padding:8px 10px; background:#000; display:flex; gap:10px; flex-wrap:wrap; align-items:center; font-size:13px; border-bottom:1px solid #333; }
+  #ui label { display:flex; gap:4px; align-items:center; }
+  #ui select, #ui input[type=range] { background:#222; color:#eee; border:1px solid #444; border-radius:4px; }
+  #status { font-size:12px; color:#9cf; flex-basis:100%; }
+  #stage { position:relative; flex:1; min-height:0; }
+  #view { position:absolute; inset:0; }
+  button { padding:6px 12px; background:#2a5; color:#fff; border:none; border-radius:4px; cursor:pointer; font-size:13px; }
+  button.sec { background:#357; }
+  button:disabled { background:#444; cursor:not-allowed; }
+  button:hover:not(:disabled) { filter:brightness(1.15); }
+  #preview { position:absolute; left:8px; bottom:8px; width:360px; background:#000c; border:1px solid #444; border-radius:6px; padding:4px; z-index:5; }
+  #pv { width:100%; display:block; background:#000; border-radius:4px; }
+  #pvInfo { font-size:11px; color:#aaa; padding:2px 4px; }
+  #timeline { position:absolute; left:380px; right:380px; bottom:12px; z-index:5; display:none; }
+  #timeline input { width:100%; }
+  #log { position:absolute; bottom:8px; right:8px; width:360px; max-height:200px; overflow:auto; background:#000b;
+         color:#0f0; font-family:monospace; font-size:11px; padding:6px; z-index:5; white-space:pre-wrap; border-radius:6px; }
+  canvas { display:block; }
+  #video { position:fixed; left:0; top:0; width:4px; height:4px; opacity:0.01; pointer-events:none; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <label title="Mostra no avatar onde estão as âncoras do rosto (verde = automático, azul = calibrado)."><input type="checkbox" id="markersChk" checked/> Âncoras</label>
+  <label>Vídeo: <input type="file" id="videoInput" accept="video/*"/></label>
+  <label>Avatar (.glb): <input type="file" id="avatarInput" accept=".glb,.gltf"/></label>
+  <label>Modelo de pose:
+    <select id="poseModel">
+      <option value="lite">Lite (rápido)</option>
+      <option value="full" selected>Full (recomendado)</option>
+      <option value="heavy">Heavy (mais preciso, lento)</option>
+    </select>
+  </label>
+  <label>FPS de análise:
+    <select id="fpsSel"><option>15</option><option selected>24</option><option>30</option></select>
+  </label>
+  <label title="Marque se o vídeo foi gravado com a câmera frontal em modo espelho: o avatar levanta a mão contrária ao esperado.">
+    <input type="checkbox" id="mirror"/> Vídeo espelhado
+  </label>
+  <label title="Suaviza o tremor dos pontos (em milissegundos). Valores altos tiram detalhe de movimentos rápidos dos dedos.">
+    Suavização: <input type="range" id="smooth" min="0" max="200" value="70" step="10"/> <span id="smoothVal">70 ms</span>
+  </label>
+  <label title="Rastreia o rosto para detectar contatos (testa, queixo, boca...) e ancorar a mão no avatar.">
+    <input type="checkbox" id="faceChk" checked/> Rosto (contatos)
+  </label>
+  <label title="Distância (em larguras de rosto) abaixo da qual a mão conta como 'tocando' o rosto.">
+    Limiar contato: <input type="range" id="eps" min="0.1" max="1" value="0.35" step="0.05"/> <span id="epsVal">0.35</span>
+  </label>
+  <label title="Quanto confiar na profundidade estimada pelo tamanho aparente da mão e do rosto (0 = só a profundidade do MediaPipe).">
+    Profundidade por tamanho: <input type="range" id="zw" min="0" max="1" value="0.5" step="0.1"/> <span id="zwVal">0.5</span>
+  </label>
+  <label title="Empurra punho e cotovelo ~8% da largura dos ombros para a frente, só quando a mão está perto/dentro do tórax (some no contato com o rosto)."><input type="checkbox" id="biasChk" checked/> Bias Z</label>
+  <label title="Volumes medidos na malha: tórax, cabeça, braços e mãos, e braço×braço. Empurra para fora se penetrar."><input type="checkbox" id="collChk" checked/> Colisão (tronco, cabeça, mãos, braços)</label>
+  <label title="Limita dedos, polegar, punho e cotovelo a amplitudes anatômicas (evita dedo quebrado para trás, cotovelo dobrando demais).">
+    <input type="checkbox" id="limChk" checked/> Limites articulares</label>
+  <label title="Se o rastreio da mão falhar (oclusão, movimento rápido), congela dedos e palma, mantém o braço por inércia e volta suavemente."><input type="checkbox" id="holdChk" checked/> Persistência das mãos</label>
+  <button id="calBtn" class="sec" disabled title="Clique no avatar para marcar testa, nariz, boca e queixo">🎯 Calibrar rosto</button>
+  <button id="trackBtn" disabled>① Rastrear vídeo</button>
+  <button id="playBtn" class="sec" disabled>▶ Reproduzir</button>
+  <button id="exportBtn" class="sec" disabled>⬇ Exportar GLB animado</button>
+  <button id="flipBtn" class="sec" disabled title="Gira o avatar 180° se ele estiver de costas">⟲ Girar avatar 180°</button>
+  <button id="resetBtn" class="sec">↺ Reset</button>
+  <button id="clearCacheBtn" class="sec" title="Remove o cache deste vídeo do IndexedDB (segure Shift para limpar todo o cache)">🗑 Limpar cache</button>
+  <span id="status">Carregue um vídeo e um avatar.</span>
+</div>
+<div id="stage">
+  <div id="view"></div>
+  <div id="preview"><canvas id="pv" width="360" height="203"></canvas><div id="pvInfo">Pré-visualização do rastreio</div></div>
+  <div id="timeline"><input type="range" id="timeRange" min="0" max="0" value="0" step="1"/></div>
+  <div id="log"></div>
+</div>
+<video id="video" playsinline muted preload="auto"></video>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { PoseLandmarker, HandLandmarker, FaceLandmarker, FilesetResolver }
+  from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+
+/* ---------- Reparo de URL.createObjectURL ----------
+ * Alguns ambientes (previews embutidos, extensões) trocam createObjectURL por um esquema próprio
+ * ("blob-request://") que <video>/<img> não conseguem ler. Recuperamos a função nativa de um iframe limpo. */
+const urlInfo = { patched: false, native: true };
+(function repairObjectURL() {
+  try {
+    const probe = URL.createObjectURL(new Blob(['x']));
+    if (/^blob:/.test(probe)) { URL.revokeObjectURL(probe); return; }
+    urlInfo.native = false;
+    const ifr = document.createElement('iframe');
+    ifr.style.display = 'none'; document.body.appendChild(ifr);
+    const U = ifr.contentWindow.URL;
+    const t = U.createObjectURL(new Blob(['x']));
+    if (/^blob:/.test(t)) {
+      U.revokeObjectURL(t);
+      Object.defineProperty(URL, 'createObjectURL', { value: b => U.createObjectURL(b), configurable: true, writable: true });
+      Object.defineProperty(URL, 'revokeObjectURL', { value: u => U.revokeObjectURL(u), configurable: true, writable: true });
+      urlInfo.patched = true;
+    }
+  } catch (e) { console.warn('repairObjectURL falhou', e); }
+})();
+const readDataURL = f => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(f); });
+
+/*==CORE_START==*/
+/* =====================================================================
+ *  NÚCLEO: detecção de ossos, orientação do avatar e retargeting.
+ *  Convenção ÚNICA de mundo (three.js / glTF):  +Y = cima,  +Z = frente
+ *  do avatar,  +X = lado ESQUERDO do avatar.  O avatar é orientado
+ *  automaticamente para respeitar isso, então nunca mais precisa de
+ *  "flipX / flipY / flipZ".
+ * ===================================================================== */
+const ID_Q = new THREE.Quaternion();
+const V3 = (x = 0, y = 0, z = 0) => new THREE.Vector3(x, y, z);
+const Y_AXIS = V3(0, 1, 0), Z_AXIS = V3(0, 0, 1);
+
+let avatar = null;
+let bones = {};          // nome -> osso
+let boneList = [];       // ossos ordenados por profundidade (pais antes de filhos)
+let mapping = {};        // chave lógica -> nome do osso
+let rig = null;          // estrutura semântica (tronco, braços, dedos)
+let driven = [];         // ossos que recebem animação
+const initial = new Map();   // osso -> quaternion original (pose do arquivo)
+const rest = new Map();      // objeto -> { lq, wq, wp, dir }  (pose de repouso, em mundo)
+const restFrames = { torso: null, left: null, right: null };
+let armGeo = { left: null, right: null };   // comprimentos de repouso: U (braço), F (antebraço), H (mão)
+let anchors = {};                            // âncoras do rosto, em coordenadas LOCAIS do osso da cabeça
+let anchorCal = {};                          // quais foram calibradas por clique
+let headH = 0.2;                             // altura estimada da cabeça (m)
+const ANCHOR_DEFAULTS = {                    // em múltiplos de headH, a partir do osso da cabeça (x esq+, y cima, z frente)
+  forehead: [0, 0.80, 0.40], nose: [0, 0.48, 0.52], mouth: [0, 0.30, 0.42],
+  chin: [0, 0.08, 0.38], cheekL: [0.30, 0.42, 0.36], cheekR: [-0.30, 0.42, 0.36],
+};
+
+const worldPos  = (o, out = new THREE.Vector3()) => out.setFromMatrixPosition(o.matrixWorld);
+const worldQuat = (o, out = new THREE.Quaternion()) => o.getWorldQuaternion(out);
+
+/* ---------- coleta de ossos ---------- */
+function collectBones(root) {
+  const found = new Map();
+  root.traverse(o => {
+    if (o.isBone) found.set(o.uuid, o);
+    if (o.isSkinnedMesh && o.skeleton) o.skeleton.bones.forEach(b => found.set(b.uuid, b));
+  });
+  const depth = b => { let d = 0, p = b.parent; while (p) { d++; p = p.parent; } return d; };
+  boneList = [...found.values()].sort((a, b) => depth(a) - depth(b));
+  bones = {};
+  for (const b of boneList) bones[b.name] = b;
+  initial.clear();
+  for (const b of boneList) initial.set(b, b.quaternion.clone());
+}
+
+/* ---------- detecção de nomes (Mixamo, Ready Player Me, VRM, Blender...) ---------- */
+const FINGER_KEY = { thumb:'Thumb', index:'Index', middle:'Middle', ring:'Ring', pinky:'Little', pinkie:'Little', little:'Little' };
+const SKIP_RE = /(twist|roll|helper|pole|target|_end$|\bik\b|headtop)/i;
+
+function classify(raw) {
+  if (SKIP_RE.test(raw)) return null;
+  const n = raw.replace(/^.*:/, '').replace(/^mixamorig[_:\-\s]?/i, '');
+  let side = null;
+  if (/left/i.test(n)) side = 'left';
+  else if (/right/i.test(n)) side = 'right';
+  else if (/(^|[_.\-\s])l([_.\-\s\d]|$)/i.test(n) || /[a-z0-9]L$/.test(n)) side = 'left';
+  else if (/(^|[_.\-\s])r([_.\-\s\d]|$)/i.test(n) || /[a-z0-9]R$/.test(n)) side = 'right';
+  const n2 = n.replace(/left|right/ig, '_')
+              .replace(/(^|[_.\-\s])[lr](?=[_.\-\s\d]|$)/ig, '$1')
+              .replace(/([a-z0-9])[LR]$/, '$1');
+  const k = n2.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  const fm = k.match(/thumb|index|middle|ring|pinky|pinkie|little/);
+  if (fm) {
+    if (!side || /meta/.test(k)) return null;
+    let seg = null;
+    if (/proximal/.test(k)) seg = 1; else if (/intermediate/.test(k)) seg = 2; else if (/distal/.test(k)) seg = 3;
+    else { const m = k.slice(k.indexOf(fm[0]) + fm[0].length).match(/0?([1-4])/); if (m) seg = +m[1]; }
+    if (!seg || seg > 3) return null;
+    return { key: `${side}${FINGER_KEY[fm[0]]}${seg}` };
+  }
+  if (/shoulder|clavicle|collar/.test(k)) return side && { key: `${side}Shoulder` };
+  if (/forearm|lowerarm/.test(k))         return side && { key: `${side}LowerArm` };
+  if (/upperarm|^arm$|[a-z]arm$/.test(k)) return side && { key: `${side}UpperArm` };
+  if (/hand$/.test(k))                    return side && { key: `${side}Hand` };
+  if (/upleg|upperleg|thigh|leg$|calf|shin|foot|toe|ball/.test(k)) return null;
+  if (/hips?$|pelvis/.test(k)) return { key: 'hips' };
+  if (/neck/.test(k))          return { key: 'neck' };
+  if (/head$/.test(k))         return { key: 'head' };
+  if (/spine|chest|torso/.test(k)) return { key: '_torso' };
+  return null;
+}
+
+function autoMap() {
+  const cand = {};
+  for (const b of boneList) {
+    const c = classify(b.name);
+    if (c) (cand[c.key] ||= []).push(b);
+  }
+  const m = {};
+  for (const [k, arr] of Object.entries(cand)) if (k !== '_torso') m[k] = arr[0].name; // o mais raso vence
+  const torso = cand._torso || [];
+  if (torso.length) { m.spine = torso[0].name; m.chest = torso[torso.length - 1].name; }
+  return m;
+}
+
+const B = key => (mapping[key] ? bones[mapping[key]] : null);
+
+/* ---------- estrutura semântica do esqueleto ---------- */
+function buildRig() {
+  const hips = B('hips'), neck = B('neck'), head = B('head');
+  // Tronco = tudo entre o quadril e o pescoço NA HIERARQUIA (independe de nomes)
+  const torso = [];
+  const top = neck || head;
+  if (hips && top) {
+    const chain = []; let p = top.parent;
+    while (p && p !== hips) { if (p.isBone) chain.unshift(p); p = p.parent; }
+    if (p === hips) torso.push(...chain);
+  }
+  const mkSide = s => {
+    const fingers = {};
+    for (const [fk, Fn] of [['thumb','Thumb'],['index','Index'],['middle','Middle'],['ring','Ring'],['pinky','Little']])
+      fingers[fk] = [1, 2, 3].map(i => B(`${s}${Fn}${i}`));
+    return { shoulder: B(`${s}Shoulder`), upper: B(`${s}UpperArm`), fore: B(`${s}LowerArm`), hand: B(`${s}Hand`), fingers };
+  };
+  rig = { hips, torso, neck, head, left: mkSide('left'), right: mkSide('right') };
+
+  const set = new Set([...torso, neck, head]);
+  for (const s of ['left', 'right']) {
+    const R = rig[s];
+    [R.upper, R.fore, R.hand].forEach(b => set.add(b));
+    Object.values(R.fingers).forEach(arr => arr.forEach(b => set.add(b)));
+  }
+  driven = boneList.filter(b => set.has(b));
+}
+
+/* ---------- pose de repouso ---------- */
+function firstChild(b) {            // 1º filho-osso a distância real (pula "ossos fantasma")
+  let c = b.children.find(x => x.isBone), guard = 0;
+  while (c && guard++ < 3) {
+    if (worldPos(c).distanceTo(worldPos(b)) > 1e-5) return c;
+    c = c.children.find(x => x.isBone);
+  }
+  return null;
+}
+function aimChildOf(b) {
+  if (rig) for (const s of ['left', 'right']) if (b === rig[s].hand) return rig[s].fingers.middle[0] || firstChild(b);
+  return firstChild(b);
+}
+
+function frameQuat(right, up) {     // base ortonormal (x=lado esquerdo, y=cima, z=frente=x×y)
+  const x = right.clone().normalize();
+  const y = up.clone();
+  const z = new THREE.Vector3().crossVectors(x, y).normalize();
+  y.crossVectors(z, x).normalize();
+  return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+}
+function handBasis(f, s) {          // x=direção dos dedos, y=lado índice→mindinho, z=x×y
+  const x = f.clone().normalize();
+  const y = s.clone().sub(x.clone().multiplyScalar(s.dot(x))).normalize();
+  const z = new THREE.Vector3().crossVectors(x, y).normalize();
+  return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x, y, z));
+}
+
+function resetPose() {
+  for (const b of boneList) b.quaternion.copy(initial.get(b));
+  avatar.updateMatrixWorld(true);
+}
+
+function captureRest() {
+  resetPose();
+  rest.clear();
+  const add = o => rest.set(o, { lq: o.quaternion.clone(), wq: worldQuat(o), wp: worldPos(o), dir: null });
+  for (const b of boneList) {
+    add(b);
+    for (let p = b.parent; p && !rest.has(p); p = p.parent) add(p);
+  }
+  for (const b of boneList) {
+    const info = rest.get(b), c = aimChildOf(b);
+    if (c) info.dir = worldPos(c).sub(info.wp).normalize();
+    else if (b.parent && rest.has(b.parent)) {
+      const d = info.wp.clone().sub(rest.get(b.parent).wp);
+      if (d.lengthSq() > 1e-12) info.dir = d.normalize();
+    }
+  }
+  // quadros de referência do tronco e das mãos
+  restFrames.torso = null; restFrames.left = restFrames.right = null;
+  const l = B('leftUpperArm') || B('leftShoulder'), r = B('rightUpperArm') || B('rightShoulder');
+  const top = B('neck') || B('head'), hips = B('hips');
+  if (l && r && top && hips)
+    restFrames.torso = frameQuat(rest.get(l).wp.clone().sub(rest.get(r).wp),
+                                 rest.get(top).wp.clone().sub(rest.get(hips).wp));
+  for (const s of ['left', 'right']) {
+    const R = rig[s];
+    armGeo[s] = (R.upper && R.fore && R.hand) ? {
+      U: rest.get(R.upper).wp.distanceTo(rest.get(R.fore).wp),
+      F: rest.get(R.fore).wp.distanceTo(rest.get(R.hand).wp),
+      H: R.fingers.middle[0] ? rest.get(R.hand).wp.distanceTo(rest.get(R.fingers.middle[0]).wp) : 0,
+    } : null;
+  }
+  for (const s of ['left', 'right']) {
+    const R = rig[s], mid = R.fingers.middle[0], idx = R.fingers.index[0], pky = R.fingers.pinky[0];
+    if (R.hand && mid && idx && pky)
+      restFrames[s] = handBasis(rest.get(mid).wp.clone().sub(rest.get(R.hand).wp),
+                                rest.get(pky).wp.clone().sub(rest.get(idx).wp));
+  }
+  buildJointAxes();
+}
+
+/* Eixos anatômicos derivados da GEOMETRIA de repouso (não dependem dos eixos locais do arquivo).
+ * Quadro da mão: x = dedos, y = s (índice→mindinho), z = x×y.
+ *  • flexão dos dedos longos: gira os dedos em direção à palma → eixo = +s (mão esq.) / −s (mão dir.)
+ *  • flexão do polegar (MCP/IP): no plano da palma, em direção ao mindinho → eixo = +z (ambas as mãos)
+ *  • desvio ulnar do punho: giro positivo em torno de +z (ambas as mãos)                                 */
+function buildJointAxes() {
+  jointInfo = new Map(); wristAxes.left = wristAxes.right = null;
+  for (const s of ['left', 'right']) {
+    const Qf = restFrames[s]; if (!Qf) continue;
+    const sy = V3(0, 1, 0).applyQuaternion(Qf), zz = V3(0, 0, 1).applyQuaternion(Qf);
+    const flexAxis = sy.clone().multiplyScalar(s === 'left' ? 1 : -1);
+    wristAxes[s] = { flex: flexAxis, dev: zz };
+    for (const [fname, chain] of Object.entries(rig[s].fingers)) {
+      chain.forEach((b, i) => {
+        const info = b && rest.get(b); if (!info || !info.dir) return;
+        const d = info.dir, base = fname === 'thumb' ? zz : flexAxis;
+        const a = base.clone().addScaledVector(d, -base.dot(d));
+        if (a.lengthSq() < 1e-8) return;
+        a.normalize();
+        const n = V3().crossVectors(d, a).normalize();
+        // curvatura já presente na pose de repouso do arquivo (positivo = já flexionado)
+        const ref = info.wp.clone().sub(rest.get(b.parent).wp);
+        let th0 = 0;
+        if (ref.lengthSq() > 1e-12) { ref.normalize(); th0 = Math.atan2(a.dot(V3().crossVectors(ref, d)), ref.dot(d)); }
+        th0 = Math.max(-45 * DEG, Math.min(45 * DEG, th0));
+        jointInfo.set(b, { a, n, th0, lim: (fname === 'thumb' ? LIMITS.thumb : LIMITS.finger)[i] });
+      });
+    }
+  }
+}
+
+/* Deixa o avatar em pé (cabeça em +Y) e de frente para +Z, venha como vier no arquivo. */
+function autoOrient() {
+  const hips = B('hips'), top = B('neck') || B('head');
+  if (!hips || !top) return;
+  avatar.updateMatrixWorld(true);
+  const up = worldPos(top).sub(worldPos(hips));
+  if (up.lengthSq() > 1e-12) {
+    avatar.quaternion.premultiply(new THREE.Quaternion().setFromUnitVectors(up.normalize(), Y_AXIS));
+    avatar.updateMatrixWorld(true);
+  }
+  const l = B('leftUpperArm') || B('leftShoulder'), r = B('rightUpperArm') || B('rightShoulder');
+  if (l && r) {
+    const lr = worldPos(l).sub(worldPos(r)); lr.y = 0;
+    if (lr.lengthSq() > 1e-12) {
+      const fwd = lr.normalize().cross(Y_AXIS);        // (esquerda × cima) = frente
+      avatar.quaternion.premultiply(new THREE.Quaternion().setFromUnitVectors(fwd, Z_AXIS));
+      avatar.updateMatrixWorld(true);
+    }
+  }
+  const h = worldPos(hips);
+  avatar.position.x -= h.x; avatar.position.z -= h.z;
+  avatar.updateMatrixWorld(true);
+}
+
+/* ---------- âncoras do rosto no avatar ---------- */
+function computeDefaultAnchors() {
+  const head = rig?.head, hips = rig?.hips;
+  if (!head) return;
+  resetPose();
+  const hp = worldPos(head);
+  const top = boneList.find(b => /headtop/i.test(b.name));
+  headH = top ? worldPos(top).distanceTo(hp) : (hips ? 0.42 * hp.distanceTo(worldPos(hips)) : 0.2);
+  headH = Math.max(headH, 1e-3);
+  for (const [k, o] of Object.entries(ANCHOR_DEFAULTS)) {
+    if (anchorCal[k]) continue;
+    anchors[k] = head.worldToLocal(hp.clone().add(V3(o[0], o[1], o[2]).multiplyScalar(headH)));
+  }
+}
+const anchorWorld = key => (anchors[key] && rig?.head) ? rig.head.localToWorld(anchors[key].clone()) : null;
+function setAnchorFromWorld(key, wpt) { anchors[key] = rig.head.worldToLocal(wpt.clone()); anchorCal[key] = true; }
+function resetAnchors() { anchorCal = {}; anchors = {}; computeDefaultAnchors(); }
+
+function registerAvatar(root) {
+  avatar = root;
+  avatar.updateMatrixWorld(true);
+  collectBones(root);
+  mapping = autoMap();
+  buildRig();
+  autoOrient();
+  captureRest();
+  anchors = {}; anchorCal = {};
+  computeDefaultAnchors();
+  measureVolumes();
+  return mapping;
+}
+function remapBone(logical, boneName) {
+  mapping[logical] = boneName; buildRig(); captureRest(); computeDefaultAnchors(); measureVolumes();
+}
+function rotateAvatarY180() {
+  avatar.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(Y_AXIS, Math.PI));
+  avatar.updateMatrixWorld(true);
+  captureRest();
+  measureVolumes();
+}
+
+/* ---------- operações de retargeting ---------- */
+function setWorld(bone, qW) {
+  const Qp = bone.parent.getWorldQuaternion(new THREE.Quaternion());
+  bone.quaternion.copy(Qp.invert().multiply(qW));
+  bone.updateMatrixWorld(true);
+}
+
+/* Aponta o osso (em direção ao seu filho) para dirWorld. A rotação mínima é calculada
+ * no espaço LOCAL do pai — assim o "giro" dos dedos acompanha a mão, e o do antebraço
+ * acompanha o braço. Não acumula torção e não depende de eixos do arquivo. */
+function aim(bone, dirWorld, { max = Math.PI, blend = 1, joint = null } = {}) {
+  const info = rest.get(bone);
+  if (!bone || !info || !info.dir || dirWorld.lengthSq() < 1e-12) return;
+  const parent = bone.parent;
+  const Qp  = parent.getWorldQuaternion(new THREE.Quaternion());
+  const Qpr = rest.get(parent)?.wq || ID_Q;
+  const dRest = info.dir.clone().applyQuaternion(Qpr.clone().invert());
+  const dTgt  = dirWorld.clone().normalize().applyQuaternion(Qp.clone().invert());
+  let swing = new THREE.Quaternion().setFromUnitVectors(dRest, dTgt);
+  if (joint && joint.lim.flex !== undefined) {   // limites de flexão/extensão e desvio lateral (no espaço local do pai)
+    const Qi = Qpr.clone().invert(), aL = joint.a.clone().applyQuaternion(Qi), nL = joint.n.clone().applyQuaternion(Qi);
+    const rv = rotVec(swing), L = joint.lim;
+    const tf = Math.min(Math.max(rv.dot(aL), -(L.ext * DEG) - joint.th0), L.flex * DEG - joint.th0);
+    const tn = Math.min(Math.max(rv.dot(nL), -L.abd * DEG), L.abd * DEG);
+    swing = fromRotVec(aL.multiplyScalar(tf).addScaledVector(nL, tn));
+  }
+  const ang = 2 * Math.acos(Math.min(1, Math.abs(swing.w)));
+  if (ang > max) swing = new THREE.Quaternion().slerpQuaternions(ID_Q, swing, max / ang);
+  let q = swing.multiply(info.lq);
+  if (blend < 1) q = new THREE.Quaternion().slerpQuaternions(info.lq, q, blend);
+  bone.quaternion.copy(q);
+  bone.updateMatrixWorld(true);
+}
+
+/* Limita o punho (mão relativa ao antebraço). Separa a torção (pronação/supinação, livre) do restante
+ * (flexão/extensão + desvio radial/ulnar) e limita só o restante. */
+function clampWrist(s) {
+  const R = rig[s], J = wristAxes[s];
+  if (!R.hand || !R.fore || !J) return;
+  const hand = R.hand, af = hand.position.clone();
+  if (af.lengthSq() < 1e-12) return;
+  af.normalize();
+  const q = hand.quaternion.clone().multiply(rest.get(hand).lq.clone().invert());       // rotação no espaço do antebraço
+  let tw = 2 * Math.atan2(af.dot(V3(q.x, q.y, q.z)), q.w);
+  if (tw > Math.PI) tw -= 2 * Math.PI; else if (tw < -Math.PI) tw += 2 * Math.PI;
+  const T = new THREE.Quaternion().setFromAxisAngle(af, tw);
+  const rv = rotVec(q.clone().multiply(T.clone().invert()));
+  const Qi = rest.get(R.fore).wq.clone().invert();
+  const aL = J.flex.clone().applyQuaternion(Qi); aL.addScaledVector(af, -aL.dot(af)).normalize();
+  const zL = J.dev.clone().applyQuaternion(Qi); zL.addScaledVector(af, -zL.dot(af)); zL.addScaledVector(aL, -zL.dot(aL)); zL.normalize();
+  const W = LIMITS.wrist;
+  const tf = Math.min(Math.max(rv.dot(aL), -W.ext * DEG), W.flex * DEG);
+  const td = Math.min(Math.max(rv.dot(zL), -W.radial * DEG), W.ulnar * DEG);
+  const out = fromRotVec(aL.multiplyScalar(tf).addScaledVector(zL, td)).multiply(T);
+  hand.quaternion.copy(out.multiply(rest.get(hand).lq));
+  hand.updateMatrixWorld(true);
+}
+
+/* Passa parte da torção (roll) do punho para o antebraço — evita o efeito "papel de bala" */
+function splitTwist(fore, hand, f = 0.5) {
+  if (!fore || !hand) return new THREE.Quaternion();
+  const a = hand.position.clone();
+  if (a.lengthSq() < 1e-12) return new THREE.Quaternion();
+  a.normalize();
+  // só a torção ADICIONAL em relação à pose de repouso (o repouso do arquivo pode ter torção própria)
+  const q = hand.quaternion.clone().multiply(rest.get(hand).lq.clone().invert());
+  let ang = 2 * Math.atan2(a.x * q.x + a.y * q.y + a.z * q.z, q.w);
+  if (ang > Math.PI) ang -= 2 * Math.PI; else if (ang < -Math.PI) ang += 2 * Math.PI;
+  const T = new THREE.Quaternion().setFromAxisAngle(a, ang * f);
+  fore.quaternion.multiply(T);
+  hand.quaternion.premultiply(T.clone().invert());
+  fore.updateMatrixWorld(true);
+  return T;                      // o congelamento precisa guardar esta torção junto com a pose da mão
+}
+
+/* =====================================================================
+ *  LIMITES ARTICULARES (graus). flex = flexão máxima (em direção à palma), ext = hiperextensão,
+ *  abd = desvio lateral. Valores de amplitude ativa normal (literatura); abd é conservador.
+ *  Dedos longos: osso 1 = MCP, osso 2 = PIP, osso 3 = DIP.  Polegar: osso 1 = CMC, 2 = MCP, 3 = IP.
+ * ===================================================================== */
+const LIMITS = {
+  finger: [ { flex: 90,  ext: 25, abd: 20 },      // MCP
+            { flex: 100, ext: 15, abd: 5  },      // PIP
+            { flex: 80,  ext: 10, abd: 5  } ],    // DIP
+  thumb:  [ { cone: 60 },                          // CMC: sela → cone de 60° em torno da posição neutra
+            { flex: 60,  ext: 8,  abd: 10 },       // MCP
+            { flex: 88,  ext: 12, abd: 5  } ],     // IP
+  wrist:  { flex: 73, ext: 71, radial: 19, ulnar: 33 },
+  elbowFlex: 150,                                  // 0° = braço esticado; nunca negativo (não dobra para trás)
+};
+const DEG = Math.PI / 180;
+let jointInfo = new Map();                         // osso -> { a, n, th0, lim }  (eixos em mundo, na pose de repouso)
+const wristAxes = { left: null, right: null };
+
+/* Vetor de rotação (eixo × ângulo) de um quaternion, e o inverso */
+function rotVec(q) {
+  const sgn = q.w < 0 ? -1 : 1, w = Math.min(1, Math.abs(q.w)), s = Math.sqrt(1 - w * w);
+  if (s < 1e-9) return V3();
+  return V3(q.x, q.y, q.z).multiplyScalar(sgn / s * 2 * Math.acos(w));
+}
+function fromRotVec(v) {
+  const a = v.length();
+  return a < 1e-12 ? new THREE.Quaternion() : new THREE.Quaternion().setFromAxisAngle(v.clone().divideScalar(a), a);
+}
+
+const FINGER_LM = {   // pares de landmarks MediaPipe (início → fim) de cada falange
+  thumb:  [[1,2],[2,3],[3,4]],
+  index:  [[5,6],[6,7],[7,8]],
+  middle: [[9,10],[10,11],[11,12]],
+  ring:   [[13,14],[14,15],[15,16]],
+  pinky:  [[17,18],[18,19],[19,20]],
+};
+const POSE_HAND_LM = { left: { pinky:17, index:19 }, right: { pinky:18, index:20 } };
+const POSE_ARM_LM  = { left: { sh:11, el:13, wr:15 }, right: { sh:12, el:14, wr:16 } };
+const HEAD_PITCH_BIAS = 0.2;   // rad: o nariz fica naturalmente abaixo da linha das orelhas
+
+const mid = (a, b) => a.clone().add(b).multiplyScalar(0.5);
+
+/* Profundidade pelo TAMANHO APARENTE (modelo de câmera pinhole: px = f·metros / Z).
+ * Mão: ajusta, por mínimos quadrados, a escala px/metro entre as 20 posições relativas ao punho
+ * (landmarks de mundo em metros × landmarks da imagem em pixels). Usar as componentes x,y de TODOS
+ * os pontos evita o erro de uma mão inclinada (foreshortening) que um simples "tamanho da caixa" teria. */
+function handDepth(w, img, vw, vh, f) {
+  let num = 0, den = 0;
+  for (let k = 1; k < 21; k++) {
+    const wx = w[k*3] - w[0], wy = w[k*3+1] - w[1];
+    const px = (img[k*2] - img[0]) * vw, py = (img[k*2+1] - img[1]) * vh;
+    num += wx * px + wy * py; den += wx * wx + wy * wy;
+  }
+  if (den < 9e-4 || num <= 0) return NaN;      // mão quase "de ponta" para a câmera: estimativa instável
+  return f / (num / den);
+}
+const FACE_WIDTH_M = 0.145;                    // largura média entre as bordas do rosto (landmarks 234–454)
+const faceDepth = (fwPx, f) => f * FACE_WIDTH_M / fwPx;
+const focalGuess = (vw, vh) => 0.75 * Math.max(vw, vh);   // ~ lente de celular (FOV ≈ 65–70°)
+
+/* =====================================================================
+ *  COLISÃO — volumes para todos os segmentos do tronco para cima
+ *  Volumes são MEDIDOS na malha do avatar (pesos de pele separam tórax/cabeça/braços/mãos);
+ *  se a malha não tiver pele, usam-se estimativas pelo esqueleto.
+ *   • Tórax: 2 cápsulas elípticas empilhadas (cintura e peito/ombros), seguem o giro do tronco
+ *   • Cabeça: elipsoide (centro e semi-eixos medidos), segue a cabeça
+ *   • Braço, antebraço: cápsulas   • Mão: cápsula FINA do punho à ponta dos dedos
+ *  Pares: mão×cabeça, antebraço×cabeça, mão×tórax, antebraço×tórax, braço×tórax,
+ *         e entre os dois braços (mão×mão, antebraço×antebraço, etc.).
+ * ===================================================================== */
+const COLL = { torsoR: 0.45, depthRatio: 0.65, relax: 0.9, iters: 16, biasFrac: 0.08, biasZone: 0.10, armArmShare: 0.5 };
+let vol = null;             // volumes de repouso (medidos)
+let COL = null;             // colisores do frame atual (mundo)
+const clamp01 = x => Math.min(1, Math.max(0, x));
+
+function closestSegSeg(p1, q1, p2, q2) {          // Ericson, "Real-Time Collision Detection" §5.1.9
+  const d1 = q1.clone().sub(p1), d2 = q2.clone().sub(p2), r = p1.clone().sub(p2);
+  const a = d1.dot(d1), e = d2.dot(d2), f = d2.dot(r), EPS = 1e-12;
+  let s = 0, t = 0;
+  if (a <= EPS && e <= EPS) { s = t = 0; }
+  else if (a <= EPS) { t = clamp01(f / e); }
+  else {
+    const c = d1.dot(r);
+    if (e <= EPS) { s = clamp01(-c / a); }
+    else {
+      const b = d1.dot(d2), den = a * e - b * b;
+      s = den > EPS ? clamp01((b * f - c * e) / den) : 0;
+      t = (b * s + f) / e;
+      if (t < 0) { t = 0; s = clamp01(-c / a); }
+      else if (t > 1) { t = 1; s = clamp01((b - c) / a); }
+    }
+  }
+  const c1 = p1.clone().addScaledVector(d1, s), c2 = p2.clone().addScaledVector(d2, t);
+  return { c1, c2, dist: c1.distanceTo(c2) };
+}
+
+function shoulderDist() {
+  const l = rig.left.upper, r = rig.right.upper;
+  return (l && r) ? worldPos(l).distanceTo(worldPos(r)) : 0.4;
+}
+
+/* ---------- medição dos volumes ---------- */
+const pct = (arr, p) => { if (!arr.length) return 0; const a = Float32Array.from(arr).sort(); return a[Math.min(a.length - 1, Math.max(0, Math.floor(p * (a.length - 1))))]; };
+const descendants = b => { const st = new Set(); b.traverse(o => st.add(o)); return st; };
+
+function fallbackVolumes() {
+  const l = rig.left.upper, r = rig.right.upper;
+  const sd = (l && r) ? rest.get(l).wp.distanceTo(rest.get(r).wp) : 0.4;
+  const rx = COLL.torsoR * sd, rz = rx * COLL.depthRatio;
+  vol = { measured: false,
+          torso: [{ t0: 0, t1: 0.5, rx, rz, zc: 0 }, { t0: 0.5, t1: 0.82, rx, rz, zc: 0 }],
+          head: null, limb: {} };
+  if (rig.head) {
+    const hp = rest.get(rig.head).wp, c = hp.clone().add(V3(0, 0.5 * headH, 0.05 * headH));
+    vol.head = { cLocal: rig.head.worldToLocal(c), ax: [0.40 * headH, 0.5 * headH, 0.45 * headH] };
+  }
+  for (const s of ['left', 'right']) {
+    const g = armGeo[s]; if (!g) continue;
+    vol.limb[s] = { rU: 0.2 * g.U, rF: 0.22 * g.F, hl: 2.0 * g.H, rH: 0.3 * g.H };
+  }
+}
+
+function measureVolumes() {
+  if (!avatar || !rig) return;
+  resetPose();
+  fallbackVolumes();
+  try {
+    const hips = rig.hips, top = rig.neck || rig.head;
+    if (!hips || !top) return;
+    const P = [], D = [], tmp = V3();
+    avatar.traverse(m => {
+      if (!m.isSkinnedMesh || !m.geometry?.attributes?.skinIndex) return;
+      m.skeleton.update();
+      const g = m.geometry, pos = g.attributes.position, si = g.attributes.skinIndex, sw = g.attributes.skinWeight;
+      for (let i = 0; i < pos.count; i++) {
+        m.getVertexPosition(i, tmp); tmp.applyMatrix4(m.matrixWorld);
+        let bk = 0, bw = -1;
+        for (let k = 0; k < 4; k++) { const w = sw.getComponent(i, k); if (w > bw) { bw = w; bk = k; } }
+        P.push(tmp.x, tmp.y, tmp.z); D.push(m.skeleton.bones[si.getComponent(i, bk)]);
+      }
+    });
+    if (D.length < 200) return;
+    const hp = rest.get(hips).wp, np = rest.get(top).wp, H = np.y - hp.y;
+    const exclude = new Set();
+    for (const s of ['left', 'right']) if (rig[s].upper) descendants(rig[s].upper).forEach(o => exclude.add(o));
+    const headSet = rig.head ? descendants(rig.head) : new Set();
+    headSet.forEach(o => exclude.add(o));
+
+    // tórax: duas faixas de altura (cintura e peito/ombros), só vértices cujo osso dominante NÃO é braço/cabeça
+    const bands = [[0.10, 0.45, 0, 0.5], [0.50, 0.80, 0.5, 0.82]], torso = [];
+    for (const [y0, y1, t0, t1] of bands) {
+      const ax = [], zs = [];
+      for (let i = 0; i < D.length; i++) {
+        const y = P[i*3+1];
+        if (y < hp.y + H * y0 || y > hp.y + H * y1 || exclude.has(D[i])) continue;
+        ax.push(Math.abs(P[i*3] - hp.x)); zs.push(P[i*3+2]);
+      }
+      if (ax.length < 30) { torso.push(vol.torso[torso.length]); continue; }
+      const zmin = pct(zs, 0.03), zmax = pct(zs, 0.97);
+      torso.push({ t0, t1, rx: pct(ax, 0.97), rz: Math.max((zmax - zmin) / 2, 1e-3), zc: (zmax + zmin) / 2 - hp.z });
+    }
+    vol.torso = torso;
+
+    // cabeça: elipsoide pela caixa (percentis) dos vértices da cabeça
+    if (rig.head) {
+      const xs = [], ys = [], zs = [];
+      for (let i = 0; i < D.length; i++) if (headSet.has(D[i])) { xs.push(P[i*3]); ys.push(P[i*3+1]); zs.push(P[i*3+2]); }
+      if (xs.length > 50) {
+        const ex = [pct(xs, .02), pct(xs, .98)], ey = [pct(ys, .02), pct(ys, .98)], ez = [pct(zs, .02), pct(zs, .98)];
+        vol.head = { cLocal: rig.head.worldToLocal(V3((ex[0]+ex[1])/2, (ey[0]+ey[1])/2, (ez[0]+ez[1])/2)),
+                     ax: [(ex[1]-ex[0])/2, (ey[1]-ey[0])/2, (ez[1]-ez[0])/2] };
+      }
+    }
+
+    // braços e mãos: raio = percentil da distância ao eixo do osso
+    for (const s of ['left', 'right']) {
+      const R = rig[s], g = armGeo[s]; if (!g || !R.upper || !R.fore || !R.hand) continue;
+      const seg = (bone, child) => {
+        const A = rest.get(bone).wp, B = rest.get(child).wp, AB = B.clone().sub(A), L2 = AB.lengthSq(), v = V3(), r = [];
+        for (let i = 0; i < D.length; i++) {
+          if (D[i] !== bone) continue;
+          v.set(P[i*3], P[i*3+1], P[i*3+2]).sub(A);
+          const t = v.dot(AB) / L2;
+          if (t > 0.15 && t < 0.85) r.push(v.clone().addScaledVector(AB, -t).length());
+        }
+        return r.length > 20 ? Math.min(pct(r, 0.9), 0.45 * Math.sqrt(L2)) : null;
+      };
+      const rU = seg(R.upper, R.fore), rF = seg(R.fore, R.hand);
+      const hsub = descendants(R.hand), hp0 = rest.get(R.hand).wp, dir = rest.get(R.hand).dir, v = V3(), proj = [], perp = [];
+      if (dir) for (let i = 0; i < D.length; i++) {
+        if (!hsub.has(D[i])) continue;
+        v.set(P[i*3], P[i*3+1], P[i*3+2]).sub(hp0);
+        const t = v.dot(dir); proj.push(t); perp.push(v.clone().addScaledVector(dir, -t).length());
+      }
+      const lim = vol.limb[s];
+      if (rU) lim.rU = rU;
+      if (rF) lim.rF = rF;
+      if (proj.length > 20) { lim.hl = Math.max(pct(proj, 0.98), 0.5 * lim.hl); lim.rH = Math.min(Math.max(0.6 * pct(perp, 0.85), 0.012), 0.06); }
+    }
+    vol.measured = true;
+  } catch (e) { console.warn('measureVolumes: usando estimativas', e); }
+}
+
+/* ---------- colisores do frame (pose atual) ---------- */
+function mkSpace(Q, sx, sy, sz) {       // leva o elipsoide a uma esfera/cápsula de raio 1
+  const Qi = Q.clone().invert();
+  return {
+    to: v => { const q = v.clone().applyQuaternion(Qi); q.x /= sx; q.y /= sy; q.z /= sz; return q; },
+    disp: u => { const d = u.clone(); d.x *= sx; d.y *= sy; d.z *= sz; return d.applyQuaternion(Q); },
+  };
+}
+function buildColliders() {
+  const hips = rig.hips, top = rig.neck || rig.head;
+  if (!vol || !hips || !top) return null;
+  const a = worldPos(hips), n = worldPos(top);
+  const chest = rig.torso[rig.torso.length - 1] || rig.hips;
+  const Q = worldQuat(chest).multiply(rest.get(chest).wq.clone().invert());       // giro atual do tronco vs. repouso
+  const torso = vol.torso.map(sg => {
+    const off = V3(0, 0, sg.zc).applyQuaternion(Q);
+    return { p0: a.clone().lerp(n, sg.t0).add(off), p1: a.clone().lerp(n, sg.t1).add(off),
+             space: mkSpace(Q, sg.rx, sg.rx, sg.rz), rAvg: (2 * sg.rx + sg.rz) / 3 };
+  });
+  let head = null;
+  if (rig.head && vol.head) {
+    const Qh = worldQuat(rig.head).multiply(rest.get(rig.head).wq.clone().invert());
+    const c = rig.head.localToWorld(vol.head.cLocal.clone()), [ax, ay, az] = vol.head.ax;
+    head = { p0: c, p1: c, space: mkSpace(Qh, ax, ay, az), rAvg: (ax + ay + az) / 3 };
+  }
+  return { torso, head };
+}
+/* penetração de uma cápsula (pa–pb, raio rad) num colisor "esticado"; pen>0 = penetra (em metros, aprox.) */
+function capVsSpace(pa, pb, rad, seg) {
+  const sp = seg.space;
+  const res = closestSegSeg(sp.to(seg.p0), sp.to(seg.p1), sp.to(pa), sp.to(pb));
+  const need = 1 + rad / seg.rAvg, pen = (need - res.dist) * seg.rAvg;
+  if (pen <= 0) return { pen, d: null };
+  const n = res.c2.clone().sub(res.c1);
+  if (n.lengthSq() < 1e-12) n.set(0, 0, 1);
+  return { pen, d: sp.disp(n.normalize().multiplyScalar(need - res.dist)) };
+}
+
+/* ---------- braço por POSIÇÃO: IK de 2 ossos + bias Z (só na zona de perigo) + contato + colisão ---------- */
+function planArm(s, S, env) {
+  const R = rig[s], g = armGeo[s], L = POSE_ARM_LM[s], P = S.P, lim = vol?.limb?.[s];
+  let Sh = P[L.sh], El = P[L.el], Wr = P[L.wr];
+  if (!g || !R.upper || !R.fore) return { fallback: true, Sh, El, Wr };
+  const shA = worldPos(R.upper);
+  const perLen = Sh.distanceTo(El) + El.distanceTo(Wr);
+  const sc = S.prop?.[s]?.scale ?? (g.U + g.F) / Math.max(perLen, 1e-6);
+  const ct = S.contact?.[s];
+  const cw = ct ? clamp01(ct.w) : 0;
+  const hd = S[s];
+  const tracked = hd ? hd.H[9].clone().sub(hd.H[0]).normalize() : null;
+  const handDirOf = (wr, el) => tracked ? tracked : wr.clone().sub(el).normalize();
+
+  // bias Z: só quando a mão está em "zona de perigo" (perto/dentro da superfície do tórax) e sem contato com o rosto
+  if (S.opts?.zBias) {
+    let zw = 1;
+    if (COL && lim) {
+      const T0 = Wr.clone().sub(Sh).multiplyScalar(sc).add(shA);
+      const tip0 = T0.clone().addScaledVector(handDirOf(Wr, El), lim.hl);
+      let pen = -1; for (const sg of COL.torso) pen = Math.max(pen, capVsSpace(T0, tip0, lim.rH, sg).pen);
+      const m = COLL.biasZone * shoulderDist();
+      zw = clamp01((pen + m) / (2 * m));
+    }
+    const biasP = (COLL.biasFrac * shoulderDist() / sc) * (1 - cw) * zw;
+    El = El.clone(); Wr = Wr.clone(); El.z += biasP; Wr.z += biasP;
+  }
+  const T = Wr.clone().sub(Sh).multiplyScalar(sc).add(shA);
+
+  if (ct && ct.w > 0.001) {
+    const aw = anchorWorld(ct.key);
+    if (aw) {
+      const off = V3();
+      if (hd && ct.k > 0) {      // o ponto que toca (ex.: ponta do indicador) fica na âncora, não o punho
+        const hl = hd.H[9].distanceTo(hd.H[0]);
+        const hs = S.prop?.hand?.[s] ?? (hl > 1e-6 && g.H ? g.H / hl : 1);
+        off.copy(hd.H[ct.k]).sub(hd.H[0]).multiplyScalar(hs);
+      }
+      T.lerp(aw.sub(off), cw);
+    }
+  }
+
+  const pAx = Wr.clone().sub(Sh);
+  if (pAx.lengthSq() > 1e-12) pAx.normalize();
+  const eoff = V3();
+  const solve = () => {
+    const d0 = T.clone().sub(shA);
+    // cotovelo: flexão ∈ [0°, 150°] ⇔ distância ombro→punho ≥ dMin (lei dos cossenos). Alvo mais perto que isso:
+    // o braço aponta para o alvo SEM dobrar além do limite (fallback contínuo, sem salto de frame).
+    const dMin = Math.max(Math.abs(g.U - g.F) + 1e-6, S.opts?.limits
+      ? Math.sqrt(g.U * g.U + g.F * g.F - 2 * g.U * g.F * Math.cos((180 - LIMITS.elbowFlex) * DEG)) : 0);
+    const d = Math.min(Math.max(d0.length(), dMin), g.U + g.F);
+    const axis = d0.lengthSq() > 1e-12 ? d0.normalize() : V3(0, -1, 0);
+    const Tc = shA.clone().addScaledVector(axis, d);
+    const a = (g.U * g.U - g.F * g.F + d * d) / (2 * d);
+    const h = Math.sqrt(Math.max(0, g.U * g.U - a * a));
+    let pole = El.clone().sub(Sh);
+    pole.addScaledVector(pAx, -pole.dot(pAx));
+    pole.addScaledVector(axis, -pole.dot(axis));
+    if (pole.lengthSq() < 1e-8) {           // braço esticado: cotovelo "pendurado" para baixo/trás
+      pole = V3(0, -1, -0.2); pole.addScaledVector(axis, -pole.dot(axis));
+      if (pole.lengthSq() < 1e-8) pole = V3(0, 0, -1).addScaledVector(axis, axis.z);
+    }
+    pole.normalize();
+    let elbow = shA.clone().addScaledVector(axis, a).addScaledVector(pole, h);
+    if (eoff.lengthSq() > 0) {              // empurrão da colisão também no cotovelo (mantém o comprimento do braço)
+      elbow = shA.clone().add(elbow.add(eoff).sub(shA).setLength(g.U));
+      return { elbow, Tc: elbow.clone().add(Tc.sub(elbow).normalize().multiplyScalar(g.F)) };
+    }
+    return { Tc, elbow };
+  };
+  const geoOf = sol => lim ? { sh: shA, el: sol.elbow, wr: sol.Tc,
+                               tip: sol.Tc.clone().addScaledVector(handDirOf(sol.Tc, sol.elbow), lim.hl),
+                               rU: lim.rU, rF: lim.rF, rH: lim.rH } : null;
+
+  // pior penetração entre este braço e (tórax, cabeça, outro braço)
+  const worst = geo => {
+    let best = null;
+    const consider = (r, wW, wE, scale) => {
+      if (!r || !r.d || r.pen * scale <= 1e-6) return;
+      if (!best || r.pen * scale > best.pen) best = { d: r.d, pen: r.pen * scale, wW, wE, scale };
+    };
+    const u0 = geo.sh.clone().lerp(geo.el, 0.25);              // ignora a raiz do ombro (junta legítima junto ao tórax)
+    for (const sg of COL.torso) {
+      consider(capVsSpace(geo.el, geo.wr, geo.rF, sg), 1, 1, 1 - cw);     // braço levantado até o rosto não "colide" com o tórax
+      consider(capVsSpace(u0, geo.el, geo.rU, sg), 0.5, 1.5, 1 - cw);
+      consider(capVsSpace(geo.wr, geo.tip, geo.rH, sg), 1, 0.5, 1 - cw);
+    }
+    if (COL.head) {                                            // no contato com o rosto a cabeça deixa de "repelir" a mão
+      consider(capVsSpace(geo.el, geo.wr, geo.rF, COL.head), 1, 1, 1 - cw);
+      consider(capVsSpace(geo.wr, geo.tip, geo.rH, COL.head), 1, 0.5, 1 - cw);
+    }
+    const o = env?.other;
+    if (o) {
+      const ou0 = o.sh.clone().lerp(o.el, 0.25);
+      const pairs = [   // [A0,A1,rA, B0,B1,rB, pesoPunho, pesoCotovelo]
+        [geo.el, geo.wr, geo.rF, o.el, o.wr, o.rF, 1, 1],
+        [geo.el, geo.wr, geo.rF, o.wr, o.tip, o.rH, 1, 1],
+        [geo.wr, geo.tip, geo.rH, o.el, o.wr, o.rF, 1, 0.5],
+        [geo.wr, geo.tip, geo.rH, o.wr, o.tip, o.rH, 1, 0.5],
+        [geo.el, geo.wr, geo.rF, ou0, o.el, o.rU, 1, 1],
+        [u0, geo.el, geo.rU, o.el, o.wr, o.rF, 0.5, 1.5],
+      ];
+      for (const [a0, a1, ra, b0, b1, rb, wW, wE] of pairs) {
+        const res = closestSegSeg(a0, a1, b0, b1), pen = ra + rb - res.dist;
+        if (pen <= 1e-6) continue;
+        const n = res.c1.clone().sub(res.c2); if (n.lengthSq() < 1e-12) n.set(0, 0, 1); n.normalize();
+        consider({ pen, d: n.multiplyScalar(pen) }, wW, wE, COLL.armArmShare);   // o outro braço faz a outra metade
+      }
+    }
+    return best;
+  };
+
+  let sol = solve();
+  if (S.opts?.collide && COL && lim) {
+    for (let it = 0; it < COLL.iters; it++) {
+      const w = worst(geoOf(sol));
+      if (!w) break;
+      const push = w.d.multiplyScalar(COLL.relax * w.scale);
+      T.addScaledVector(push, w.wW); eoff.addScaledVector(push, w.wE);
+      sol = solve();
+    }
+  }
+  return { sol, geo: geoOf(sol) };
+}
+function applyArm(s, plan) {
+  const R = rig[s];
+  if (plan.fallback) {
+    if (R.upper) aim(R.upper, plan.El.clone().sub(plan.Sh), { max: Math.PI * 0.98 });
+    if (R.fore)  aim(R.fore,  plan.Wr.clone().sub(plan.El), { max: Math.PI * 0.98 });
+    return;
+  }
+  const shA = worldPos(R.upper);
+  aim(R.upper, plan.sol.elbow.clone().sub(shA), { max: Math.PI * 0.98 });
+  aim(R.fore,  plan.sol.Tc.clone().sub(plan.sol.elbow), { max: Math.PI * 0.98 });
+}
+
+/* S = { P:[33 Vector3], vis:[33], left:{H:[21 Vector3], c}|null, right:{...}|null }
+ *     (já no espaço do mundo: +Y cima, +Z frente do avatar, +X esquerda do avatar) */
+function retargetFrame(S) {
+  resetPose();
+  const P = S.P, vis = S.vis;
+
+  // ----- tronco: orientação absoluta a partir da linha dos ombros (+ quadril se visível)
+  let Rtorso = new THREE.Quaternion();
+  if (restFrames.torso) {
+    const hipsOk = vis[23] > 0.5 && vis[24] > 0.5;
+    const up = hipsOk ? mid(P[11], P[12]).sub(mid(P[23], P[24])) : V3(0, 1, 0);
+    const Ft = frameQuat(P[11].clone().sub(P[12]), up);
+    Rtorso = Ft.multiply(restFrames.torso.clone().invert());
+    const n = rig.torso.length;
+    rig.torso.forEach((b, i) => {
+      const q = new THREE.Quaternion().slerpQuaternions(ID_Q, Rtorso, (i + 1) / n);
+      setWorld(b, q.multiply(rest.get(b).wq));
+    });
+  }
+
+  // ----- cabeça e pescoço
+  let Rhead = Rtorso.clone();
+  if ((vis[0] + vis[7] + vis[8]) / 3 > 0.3) {
+    const earMid = mid(P[7], P[8]);
+    const xH = P[7].clone().sub(P[8]);
+    const fwd = P[0].clone().sub(earMid);
+    const upH = fwd.clone().cross(xH);                       // frente × esquerda = cima
+    if (xH.lengthSq() > 1e-10 && upH.lengthSq() > 1e-10) {
+      Rhead = frameQuat(xH, upH).multiply(new THREE.Quaternion().setFromAxisAngle(V3(1, 0, 0), -HEAD_PITCH_BIAS));
+    }
+  }
+  if (rig.neck) setWorld(rig.neck, new THREE.Quaternion().slerpQuaternions(Rtorso, Rhead, 0.5).multiply(rest.get(rig.neck).wq));
+  if (rig.head) setWorld(rig.head, Rhead.clone().multiply(rest.get(rig.head).wq));
+
+  // ----- correção de profundidade (Z) pelo tamanho aparente da mão vs. rosto
+  const earZ = (P[7].z + P[8].z) / 2;
+  for (const s of ['left', 'right']) {
+    const zf = S.zFix?.[s];
+    if (!zf || !(zf.k > 0)) continue;
+    const L = POSE_ARM_LM[s], ph = POSE_HAND_LM[s];
+    const shift = (earZ + zf.dz - P[L.wr].z) * Math.min(1, zf.k);
+    for (const i of [L.wr, ph.index, ph.pinky]) P[i].z += shift;        // punho e dedos da pose andam juntos
+    P[L.el].z += shift * 0.5;                                            // cotovelo acompanha pela metade
+  }
+
+  // ----- planejar os dois braços (posição + colisão). 2ª passada: cada braço enxerga o outro já resolvido
+  COL = (S.opts?.collide || S.opts?.zBias) ? buildColliders() : null;
+  const plans = {};
+  for (const pass of [0, 1]) {
+    if (pass === 1 && !(S.opts?.collide && COL)) break;
+    for (const s of ['left', 'right']) {
+      const other = s === 'left' ? 'right' : 'left';
+      plans[s] = planArm(s, S, pass === 1 ? { other: plans[other]?.geo } : null);
+    }
+  }
+
+  // ----- braços, mãos e dedos
+  const capture = { left: null, right: null };
+  for (const s of ['left', 'right']) {
+    const R = rig[s], L = POSE_ARM_LM[s];
+    const Sh = P[L.sh], El = P[L.el], Wr = P[L.wr];
+    applyArm(s, plans[s]);
+
+    const hold = S.hold?.[s];
+    if (hold?.frozen) { applyFrozen(s, hold); continue; }      // mão congelada: ignora os dados da mão, braço segue o punho
+
+    const hd = S[s];
+    const c = hd ? hd.c : 0;
+    let tw = new THREE.Quaternion();
+    if (R.hand) {
+      // 1) fallback só com a pose (direção punho → meio entre indicador e mindinho)
+      const ph = POSE_HAND_LM[s];
+      aim(R.hand, mid(P[ph.index], P[ph.pinky]).sub(Wr));
+      // 2) com a mão rastreada: orientação COMPLETA (inclui giro da palma)
+      if (hd && c > 0.01 && restFrames[s]) {
+        const qPose = R.hand.quaternion.clone();
+        const H = hd.H;
+        const Ft = handBasis(H[9].clone().sub(H[0]), H[17].clone().sub(H[5]));
+        setWorld(R.hand, Ft.multiply(restFrames[s].clone().invert()).multiply(rest.get(R.hand).wq));
+        if (c < 1) { R.hand.quaternion.copy(new THREE.Quaternion().slerpQuaternions(qPose, R.hand.quaternion.clone(), c)); R.hand.updateMatrixWorld(true); }
+      }
+      if (S.opts?.limits) clampWrist(s);
+      tw = splitTwist(R.fore, R.hand, 0.5);
+    }
+
+    // 3) dedos (falange por falange)
+    if (hd && c > 0.01) {
+      const H = hd.H;
+      for (const [fname, segs] of Object.entries(FINGER_LM)) {
+        const chain = R.fingers[fname];
+        segs.forEach(([a, b], i) => {
+          if (!chain[i]) return;
+          const J = S.opts?.limits ? jointInfo.get(chain[i]) : null;
+          const cone = J?.lim.cone !== undefined ? J.lim.cone * DEG : null;                 // CMC do polegar
+          aim(chain[i], H[b].clone().sub(H[a]), { max: cone ?? (J ? Math.PI : (fname === 'thumb' ? 1.7 : 1.95)), blend: c, joint: J });
+        });
+      }
+    }
+    // pose RASTREADA deste frame (antes de qualquer mistura) — vira a "última pose válida" se o frame for válido
+    capture[s] = { quats: handBoneList(s).map(b => b ? b.quaternion.clone() : null), twist: tw.clone() };
+    if (hold?.blend) blendHand(s, hold.blend, tw);
+  }
+  return capture;
+}
+
+function snapshotDriven() {
+  const arr = new Float32Array(driven.length * 4);
+  driven.forEach((b, i) => b.quaternion.toArray(arr, i * 4));
+  return arr;
+}
+
+/* =====================================================================
+ *  PERSISTÊNCIA DAS MÃOS: quando o rastreio da mão falha (oclusão, sobreposição, movimento rápido),
+ *  congela dedos+palma na última pose válida, mantém o braço em movimento por inércia (dead reckoning,
+ *  com amortecimento) e volta suavemente (slerp/lerp) quando o rastreio retorna.
+ *  c = confiança suavizada da mão:  c ≥ enter → pose válida;  posOnly ≤ c < enter → só o punho é aceito.
+ * ===================================================================== */
+const HOLD = {
+  enter: 0.5,          // aceita pose da mão
+  posOnly: 0.3,        // aceita só a posição do punho
+  debounce: 2,         // frames inválidos seguidos até congelar
+  maxSec: 1.5,         // depois disso a mão volta ao repouso
+  decay: 0.85,         // amortecimento da velocidade do punho por frame
+  blend: 4,            // frames de transição na recuperação
+  restFade: 6,         // frames para suavizar a volta ao repouso após o tempo máximo (evita estalo)
+  trustPoseVis: 0,     // >0: se a visibilidade do punho na POSE for ≥ isto, usa o punho da pose em vez de extrapolar
+};
+function handBoneList(s) {                    // palma + 15 falanges (16 entradas; ausentes = null)
+  const R = rig[s], l = [R.hand];
+  for (const f of ['thumb', 'index', 'middle', 'ring', 'pinky']) l.push(...R.fingers[f]);
+  return l;
+}
+const restHandQuats = s => handBoneList(s).map(b => b ? rest.get(b).lq.clone() : null);
+
+function applyFrozen(s, hold) {               // aplica EXATAMENTE a pose salva (+ a torção do antebraço daquele momento)
+  const R = rig[s];
+  if (R.fore && hold.twist) { R.fore.quaternion.multiply(hold.twist); R.fore.updateMatrixWorld(true); }
+  handBoneList(s).forEach((b, i) => { if (b && hold.quats[i]) b.quaternion.copy(hold.quats[i]); });
+  if (R.hand) R.hand.updateMatrixWorld(true);
+}
+function blendHand(s, b, twistNew) {          // slerp: pose congelada (t=0) → pose rastreada (t=1)
+  const R = rig[s];
+  if (R.fore && b.twist) {
+    const Tb = new THREE.Quaternion().slerpQuaternions(b.twist, twistNew, b.t);
+    R.fore.quaternion.multiply(twistNew.clone().invert()).multiply(Tb);
+    R.fore.updateMatrixWorld(true);
+  }
+  handBoneList(s).forEach((bone, i) => {
+    if (bone && b.quats[i]) { const cur = bone.quaternion.clone(); bone.quaternion.slerpQuaternions(b.quats[i], cur, b.t); }
+  });
+  if (R.hand) R.hand.updateMatrixWorld(true);
+}
+
+class HandHold {
+  constructor(side, fps) {
+    this.side = side; this.dt = 1 / fps; this.maxFrames = Math.round(HOLD.maxSec * fps);
+    this.stats = { total: 0, valid: 0, frozen: 0, dead: 0, episodes: 0 };
+    this.reset();
+  }
+  reset() {
+    this.isFrozen = false; this.framesLost = 0; this.lastValidQuats = null; this.lastTwist = null;
+    this.lastWristPos = null; this.shownWrist = null; this.wristVelocity = V3(); this.blendCount = 0;
+    this.hist = []; this.ext = null; this.extVel = null; this.shown = null; this.shownTwist = null;
+  }
+  /* Chamar a cada frame ANTES do retargeting. hd = {H,c}|null (confiança já suavizada); Wr = punho da pose (Vector3). */
+  begin(hd, Wr, wristVis = 1) {
+    this.stats.total++;
+    const c = hd ? hd.c : 0;
+    const valid = !!hd && c >= HOLD.enter;                       // (os 21 landmarks existem sempre que hd existe)
+    const posOnly = !valid && !!hd && c >= HOLD.posOnly;
+    if (valid) {
+      if (this.isFrozen) { this.isFrozen = false; this.blendCount = HOLD.blend; }       // re-detecção
+      this.framesLost = 0; this.stats.valid++;
+    } else {
+      this.framesLost++;
+      if (this.framesLost >= HOLD.debounce && this.lastValidQuats && !this.isFrozen) { this.isFrozen = true; this.stats.episodes++; }
+    }
+
+    // ----- punho: aceito (válido / só-posição / pose confiável) ou extrapolado (dead reckoning)
+    const trustPose = HOLD.trustPoseVis > 0 && wristVis >= HOLD.trustPoseVis;
+    const accepts = valid || posOnly || trustPose || !this.lastWristPos;
+    let wrist = null;
+    if (this.isFrozen && !accepts) {
+      // começa de onde o punho estava sendo EXIBIDO no frame anterior (evita travar 1 frame no frame de debounce)
+      if (!this.ext) { this.ext = (this.shownWrist || this.lastWristPos).clone(); this.extVel = this.wristVelocity.clone(); }
+      this.ext.addScaledVector(this.extVel, this.dt);            // posição = última + velocidade × dt
+      this.extVel.multiplyScalar(HOLD.decay);                    // desacelera a cada frame
+      wrist = this.ext.clone(); this.stats.dead++;
+    } else {
+      if (valid && this.blendCount > 0 && this.ext) {            // volta após dead reckoning: lerp extrapolada → rastreada
+        this.ext.addScaledVector(this.extVel, this.dt); this.extVel.multiplyScalar(HOLD.decay);
+        wrist = this.ext.clone().lerp(Wr, (HOLD.blend + 1 - this.blendCount) / (HOLD.blend + 1));
+      } else if (accepts) this.ext = null;
+      if (accepts) {                                             // velocidade medida nos últimos frames aceitos
+        this.hist.push(Wr.clone()); if (this.hist.length > 3) this.hist.shift();
+        this.wristVelocity = this.hist.length >= 2 ? Wr.clone().sub(this.hist[0]).divideScalar((this.hist.length - 1) * this.dt) : V3();
+        this.lastWristPos = Wr.clone();
+      }
+    }
+
+    this.shownWrist = (wrist || Wr).clone();
+
+    // ----- dedos e palma
+    let hold = { frozen: false }, outHd = hd;
+    if (this.isFrozen) {
+      const over = this.framesLost - this.maxFrames;             // passou de 1,5 s → volta ao repouso (com fade curto)
+      const f = over > 0 ? Math.min(1, over / HOLD.restFade) : 0, restQ = f > 0 ? restHandQuats(this.side) : null;
+      const quats = this.lastValidQuats.map((q, i) => !q ? null
+        : (restQ && restQ[i]) ? new THREE.Quaternion().slerpQuaternions(q, restQ[i], f) : q.clone());
+      const twist = new THREE.Quaternion().slerpQuaternions(this.lastTwist, ID_Q, f);
+      this.shown = quats; this.shownTwist = twist;
+      hold = { frozen: true, quats, twist }; outHd = null;       // ignora os dados da mão (estão corrompidos)
+      this.stats.frozen++;
+    } else if (valid) {
+      outHd = { H: hd.H, c: 1 };                                 // válido = pose inteira (sem puxar para o repouso)
+      if (this.blendCount > 0 && this.shown)
+        hold = { frozen: false, blend: { quats: this.shown, twist: this.shownTwist, t: (HOLD.blend + 1 - this.blendCount) / (HOLD.blend + 1) } };
+    }
+    return { hd: outHd, hold, wrist, valid };
+  }
+  /* Chamar DEPOIS do retargeting com a captura devolvida por retargetFrame. */
+  end(capture, plan) {
+    if (plan.valid && capture) { this.lastValidQuats = capture.quats; this.lastTwist = capture.twist; }
+    if (plan.valid && this.blendCount > 0 && --this.blendCount === 0) { this.ext = this.extVel = this.shown = this.shownTwist = null; }
+  }
+}
+
+/* retargetFrame com persistência. S0 = dados do frame (mãos já suavizadas); holds = { left, right } de HandHold */
+function retargetHeld(S0, holds) {
+  if (!holds) return retargetFrame(S0);
+  const S = { ...S0, P: S0.P.map(v => v.clone()), hold: {}, zFix: { ...(S0.zFix || {}) } };
+  const plans = {};
+  for (const s of ['left', 'right']) {
+    const L = POSE_ARM_LM[s], ph = POSE_HAND_LM[s];
+    const plan = holds[s].begin(S0[s], S.P[L.wr], S0.vis[L.wr]);
+    plans[s] = plan; S[s] = plan.hd; S.hold[s] = plan.hold;
+    if (plan.wrist || plan.hold.frozen) S.zFix[s] = null;       // correção de profundidade usa dados da mão: não vale congelada
+    if (plan.wrist) { const d = plan.wrist.clone().sub(S.P[L.wr]); for (const i of [L.wr, ph.index, ph.pinky]) S.P[i].add(d); }
+  }
+  const cap = retargetFrame(S);
+  for (const s of ['left', 'right']) holds[s].end(cap?.[s], plans[s]);
+  cap.plans = plans;
+  return cap;
+}
+/*==CORE_END==*/
+
+/* =====================================================================
+ *  A partir daqui: cena, rastreio (MediaPipe), UI, exportação
+ * ===================================================================== */
+const $ = id => document.getElementById(id);
+const logEl = $('log'), statusEl = $('status');
+const log = m => { logEl.textContent += m + '\n'; logEl.scrollTop = logEl.scrollHeight; };
+const setStatus = m => { statusEl.textContent = m; };
+
+/* ---------- Cena ---------- */
+const view = $('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+view.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x222222);
+const camera = new THREE.PerspectiveCamera(40, 1, 0.05, 100);
+camera.position.set(0, 1.4, 2.6);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1.2, 0); controls.update();
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 2));
+const dL = new THREE.DirectionalLight(0xffffff, 2); dL.position.set(2, 4, 3); scene.add(dL);
+scene.add(new THREE.GridHelper(4, 8, 0x444444, 0x222222));
+function resize() {
+  const w = view.clientWidth, h = Math.max(100, view.clientHeight);
+  renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+let rzPending = false;
+new ResizeObserver(() => { if (rzPending) return; rzPending = true; requestAnimationFrame(() => { rzPending = false; resize(); }); }).observe(view);
+resize();
+
+function frameCameraOnUpperBody() {
+  const hips = B('hips'), head = B('head') || B('neck');
+  if (!hips || !head) return;
+  avatar.updateMatrixWorld(true);
+  const hp = worldPos(hips), hd = worldPos(head);
+  const h = Math.max(0.1, hd.y - hp.y);
+  const ty = hd.y - h * 0.45;
+  controls.target.set(0, ty, 0);
+  camera.position.set(0, ty + h * 0.15, h * 2.6);
+  camera.near = h * 0.02; camera.far = h * 100; camera.updateProjectionMatrix();
+  controls.update();
+}
+
+/* ---------- Marcadores das âncoras do rosto + calibração por clique ---------- */
+const markerGroup = new THREE.Group(); scene.add(markerGroup);
+const markerMeshes = {};
+function clearMarkers() { for (const k of Object.keys(markerMeshes)) { markerGroup.remove(markerMeshes[k]); delete markerMeshes[k]; } }
+function updateMarkers() {
+  markerGroup.visible = $('markersChk').checked;
+  if (!avatar || !rig?.head || !markerGroup.visible) return;
+  for (const k of Object.keys(anchors)) {
+    let m = markerMeshes[k];
+    if (!m) {
+      m = new THREE.Mesh(new THREE.SphereGeometry(1, 8, 8), new THREE.MeshBasicMaterial({ color: anchorCal[k] ? 0x00aaff : 0x00ff88, depthTest: false }));
+      m.renderOrder = 999; markerGroup.add(m); markerMeshes[k] = m;
+    }
+    m.material.color.setHex(anchorCal[k] ? 0x00aaff : 0x00ff88);
+    m.scale.setScalar(headH * 0.025);
+    m.position.copy(anchorWorld(k));
+  }
+}
+const raycaster = new THREE.Raycaster();
+const CAL_ORDER = [['forehead', 'a TESTA'], ['nose', 'o NARIZ'], ['mouth', 'a BOCA'], ['chin', 'o QUEIXO']];
+let calib = null, pdown = null;
+function startCalibration() {
+  if (!avatar || !rig?.head) return;
+  playing = false; $('playBtn').textContent = '▶ Reproduzir';
+  resetPose();
+  const hp = worldPos(rig.head);
+  controls.target.set(hp.x, hp.y + headH * 0.5, hp.z);
+  camera.position.set(hp.x, hp.y + headH * 0.5, hp.z + headH * 3.5);
+  controls.update();
+  calib = { i: 0 };
+  setStatus(`Calibração 1/4: clique em ${CAL_ORDER[0][1]} do avatar (bolinhas verdes = estimativa automática).`);
+}
+renderer.domElement.addEventListener('pointerdown', e => { pdown = { x: e.clientX, y: e.clientY }; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (!calib || !pdown || Math.hypot(e.clientX - pdown.x, e.clientY - pdown.y) > 5) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  raycaster.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
+  const hit = raycaster.intersectObject(avatar, true).find(h => h.object.isMesh);
+  if (!hit) { setStatus('Clique em cima do avatar.'); return; }
+  const [key, label] = CAL_ORDER[calib.i];
+  setAnchorFromWorld(key, hit.point);
+  log(`Âncora "${key}" calibrada.`);
+  calib.i++;
+  if (calib.i < CAL_ORDER.length) { setStatus(`Calibração ${calib.i + 1}/4: clique em ${CAL_ORDER[calib.i][1]}.`); return; }
+  // bochechas derivadas do nariz
+  const nose = anchorWorld('nose');
+  setAnchorFromWorld('cheekL', nose.clone().add(V3( 0.30 * headH, 0, -0.12 * headH)));
+  setAnchorFromWorld('cheekR', nose.clone().add(V3(-0.30 * headH, 0, -0.12 * headH)));
+  calib = null; setStatus('Calibração do rosto concluída (bolinhas azuis).');
+  if (track) applyTracking();
+});
+
+/* ---------- Cache IndexedDB ---------- */
+const DB_NAME = 'mocap-cache', DB_VERSION = 1, STORE = 'tracks';
+let _db = null;
+
+function openDB() {
+  if (_db) return Promise.resolve(_db);
+  return new Promise((res, rej) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = e => e.target.result.createObjectStore(STORE);
+    req.onsuccess  = e => { _db = e.target.result; res(_db); };
+    req.onerror    = e => rej(e.target.error);
+  });
+}
+
+function cacheKey(file, modelKey) {
+  if (!file) return '';
+  const lm = file.lastModified || 0;
+  return file.name + '|' + file.size + '|' + lm + '|' + modelKey;
+}
+
+async function cacheLoad(key) {
+  try {
+    const db = await openDB();
+    return await new Promise((res, rej) => {
+      const tx = db.transaction(STORE, 'readonly');
+      const req = tx.objectStore(STORE).get(key);
+      req.onsuccess = e => res(e.target.result ?? null);
+      req.onerror   = e => rej(e.target.error);
+    });
+  } catch (e) { console.warn('cacheLoad falhou:', e); return null; }
+}
+
+async function cacheSave(key, data) {
+  try {
+    const db = await openDB();
+    await new Promise((res, rej) => {
+      const tx = db.transaction(STORE, 'readwrite');
+      const req = tx.objectStore(STORE).put(data, key);
+      req.onsuccess = () => res();
+      req.onerror   = e => rej(e.target.error);
+    });
+    log('Cache salvo: ' + key.split('|')[0] + ' [' + key.split('|')[3] + '].');
+  } catch (e) { console.warn('cacheSave falhou:', e); }
+}
+
+function serializeTrack(t) {
+  const N = t.N;
+  const packArray = (arr, stride) => {
+    const mask = new Uint8Array(N);
+    const buf  = new Float32Array(N * stride);
+    for (let i = 0; i < N; i++) {
+      if (arr[i]) { mask[i] = 1; buf.set(arr[i], i * stride); }
+    }
+    return { mask, buf };
+  };
+  return {
+    fps: t.fps, N, w: t.w, h: t.h, hasFace: t.hasFace,
+    pose:    packArray(t.pose,    132),
+    handL:   packArray(t.handL,   63),
+    handR:   packArray(t.handR,   63),
+    contact: t.contact,
+    depth:   t.depth,
+    draw:    t.draw,
+  };
+}
+
+function deserializeTrack(d) {
+  const N = d.N;
+  const unpack = ({ mask, buf }, stride) =>
+    Array.from({ length: N }, (_, i) =>
+      mask[i] ? buf.slice(i * stride, i * stride + stride) : null);
+  return {
+    fps: d.fps, N, w: d.w, h: d.h, hasFace: !!d.hasFace,
+    pose:    d.pose ? unpack(d.pose,  132) : new Array(N).fill(null),
+    handL:   d.handL ? unpack(d.handL,  63) : new Array(N).fill(null),
+    handR:   d.handR ? unpack(d.handR,  63) : new Array(N).fill(null),
+    contact: d.contact || new Array(N).fill(null),
+    depth:   d.depth || new Array(N).fill(null),
+    draw:    d.draw || new Array(N).fill(null),
+  };
+}
+
+/* ---------- Estado da aplicação ---------- */
+let track = null;        // dados brutos do MediaPipe
+let anim = null;         // { fps, N, snaps:[Float32Array] }
+let playing = false, playT = 0, lastTick = performance.now();
+const videoEl = $('video');
+let _currentVideoFile = null;
+
+/* ---------- Avatar ---------- */
+const loader = new GLTFLoader();
+function loadAvatar(buf) {
+  return new Promise((resolve, reject) => {
+    const _cib = window.createImageBitmap;
+    window.createImageBitmap = undefined;   // força o GLTFLoader a usar <img> (ImageBitmapLoader falha em alguns GLBs)
+    const restoreCib = () => { window.createImageBitmap = _cib; };
+    loader.parse(buf, '', gltf => {
+      restoreCib();
+      try {
+        if (avatar) scene.remove(avatar);
+        clearMarkers(); calib = null;
+        const root = gltf.scene;
+        root.traverse(o => { if (o.isMesh) o.frustumCulled = false; });
+        scene.add(root);
+        const m = registerAvatar(root);
+        log(`Ossos: ${boneList.length} | animados: ${driven.length}`);
+        log(`Mapeamento: ${JSON.stringify(m)}`);
+        const need = ['hips','neck','head','leftUpperArm','leftLowerArm','leftHand','rightUpperArm','rightLowerArm','rightHand'];
+        const miss = need.filter(k => !m[k]);
+        if (miss.length) log('⚠ Ossos essenciais não encontrados: ' + miss.join(', ') + '  → use remap("chave","NomeDoOsso")');
+        const nf = Object.keys(m).filter(k => /(Thumb|Index|Middle|Ring|Little)\d$/.test(k)).length;
+        log(`Dedos mapeados: ${nf}/30`);
+        log(vol.measured ? `Volumes de colisão medidos na malha: tórax ${vol.torso.map(t => (t.rx*200).toFixed(0) + '×' + (t.rz*200).toFixed(0)).join('/')} cm (larg×prof), cabeça ${vol.head ? vol.head.ax.map(v => (v*200).toFixed(0)).join('×') : '?'} cm`
+                              : '⚠ Malha sem pele (skinIndex): colisão usando estimativas pelo esqueleto.');
+        if (!restFrames.torso) log('⚠ Não consegui calcular o quadro do tronco (faltam ombros/pescoço/quadril).');
+        anim = null; playing = false;
+        frameCameraOnUpperBody();
+        resolve();
+      } catch (e) { reject(e); }
+    }, e => { restoreCib(); reject(e); });
+    setTimeout(restoreCib, 0);   // o parser já leu a flag no construtor
+  });
+}
+
+/* ---------- Rastreio com MediaPipe Tasks (Pose + Hand, SEM malha facial/pernas) ---------- */
+const WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
+const POSE_URL = {
+  lite:  'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+  full:  'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task',
+  heavy: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task',
+};
+const HAND_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+
+const FACE_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+const FACE_IDX = [10, 1, 13, 152, 234, 454];   // testa, nariz, boca, queixo, borda-esq-da-imagem, borda-dir-da-imagem
+async function createTrackers(modelKey, withFace) {
+  const fileset = await FilesetResolver.forVisionTasks(WASM);
+  const mk = async delegate => ({
+    pose: await PoseLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: POSE_URL[modelKey], delegate },
+      runningMode: 'VIDEO', numPoses: 1,
+      minPoseDetectionConfidence: 0.5, minPosePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
+    }),
+    hand: await HandLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: HAND_URL, delegate },
+      runningMode: 'IMAGE', numHands: 2,
+      minHandDetectionConfidence: 0.35, minHandPresenceConfidence: 0.35, minTrackingConfidence: 0.35,
+    }),
+    face: withFace ? await FaceLandmarker.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: FACE_URL, delegate },
+      runningMode: 'VIDEO', numFaces: 1,
+      minFaceDetectionConfidence: 0.4, minFacePresenceConfidence: 0.4, minTrackingConfidence: 0.4,
+    }) : null,
+  });
+  try { return await mk('GPU'); }
+  catch (e) { log('GPU indisponível, usando CPU (mais lento).'); return await mk('CPU'); }
+}
+
+const VIDEO_ERR = { 1:'carregamento abortado', 2:'erro de rede', 3:'falha ao decodificar', 4:'formato/codec não suportado pelo navegador' };
+async function prepareVideo() {
+  const v = videoEl;
+  if (v.error) throw new Error(`Vídeo inválido: ${VIDEO_ERR[v.error.code] || v.error.message}. Converta para MP4 H.264 (ex.: HandBrake ou ffmpeg -i in.mov -c:v libx264 -pix_fmt yuv420p out.mp4).`);
+  if (v.readyState < 1) {
+    setStatus('Carregando vídeo...');
+    await new Promise((res, rej) => {
+      const to = setTimeout(() => rej(new Error('O navegador não conseguiu ler o vídeo em 30 s. Provável codec não suportado (HEVC/H.265 de iPhone, .mov). Converta para MP4 H.264.')), 30000);
+      v.addEventListener('loadedmetadata', () => { clearTimeout(to); res(); }, { once: true });
+      v.addEventListener('error', () => { clearTimeout(to); rej(new Error(`Vídeo inválido: ${VIDEO_ERR[v.error?.code] || 'erro'}. Converta para MP4 H.264.`)); }, { once: true });
+    });
+  }
+  if (!isFinite(v.duration)) {            // webm gravado no navegador costuma vir com duração "Infinity"
+    v.currentTime = 1e101;
+    await new Promise(r => v.addEventListener('timeupdate', r, { once: true }));
+    v.currentTime = 0;
+    await new Promise(r => setTimeout(r, 150));
+  }
+  if (!(v.duration > 0) || !v.videoWidth) throw new Error('Vídeo sem duração/dimensões válidas.');
+  if (v.readyState < 2) await new Promise(r => { v.addEventListener('loadeddata', r, { once: true }); setTimeout(r, 5000); });
+  return v;
+}
+
+function seekTo(v, t) {
+  return new Promise(res => {
+    t = Math.min(Math.max(0, t), Math.max(0, v.duration - 0.001));
+    if (Math.abs(v.currentTime - t) < 1e-4 && v.readyState >= 2) return res();
+    let done = false, to;
+    const fin = () => { if (done) return; done = true; clearTimeout(to); v.removeEventListener('seeked', fin); res(); };
+    to = setTimeout(fin, 1500);
+    v.addEventListener('seeked', fin);
+    v.currentTime = t;
+  });
+}
+
+/* Recorte quadrado em volta do punho: a mão ocupa o recorte inteiro, então o modelo de
+ * mão enxerga os dedos com muito mais resolução do que na imagem completa. Também resolve
+ * esquerda/direita: sabemos de qual punho veio o recorte. */
+const cropCv = document.createElement('canvas'); cropCv.width = cropCv.height = 256;
+const cropCtx = cropCv.getContext('2d');
+function drawCrop(v, cx, cy, size) {
+  const sx = cx - size / 2, sy = cy - size / 2, vw = v.videoWidth, vh = v.videoHeight;
+  cropCtx.fillStyle = '#000'; cropCtx.fillRect(0, 0, 256, 256);
+  const x0 = Math.max(0, sx), y0 = Math.max(0, sy), x1 = Math.min(vw, sx + size), y1 = Math.min(vh, sy + size);
+  if (x1 - x0 < 8 || y1 - y0 < 8) return null;
+  const k = 256 / size;
+  cropCtx.drawImage(v, x0, y0, x1 - x0, y1 - y0, (x0 - sx) * k, (y0 - sy) * k, (x1 - x0) * k, (y1 - y0) * k);
+  return { sx, sy, size };
+}
+
+function detectHand(hand, v, wrist, elbow, upperLen) {
+  const vw = v.videoWidth, vh = v.videoHeight;
+  const foreLen = Math.hypot(wrist.x - elbow.x, wrist.y - elbow.y);
+  const ref = Math.max(foreLen, upperLen * 0.85);
+  const dir = foreLen > 1 ? { x: (wrist.x - elbow.x) / foreLen, y: (wrist.y - elbow.y) / foreLen } : { x: 0, y: -1 };
+  const base = Math.min(Math.max(ref * 2.0, 0.16 * Math.min(vw, vh)), Math.min(vw, vh));
+  const attempts = [
+    { size: base,       cx: wrist.x + dir.x * base * 0.22, cy: wrist.y + dir.y * base * 0.22 },
+    { size: base * 1.7, cx: wrist.x + dir.x * base * 0.30, cy: wrist.y + dir.y * base * 0.30 },
+  ];
+  for (const a of attempts) {
+    const c = drawCrop(v, a.cx, a.cy, Math.min(a.size, Math.max(vw, vh)));
+    if (!c) continue;
+    const res = hand.detect(cropCv);
+    if (!res.landmarks?.length) continue;
+    // escolhe a mão cujo punho está mais perto do punho esperado
+    const ex = (wrist.x - c.sx) / c.size, ey = (wrist.y - c.sy) / c.size;
+    let best = -1, bd = 1e9;
+    res.landmarks.forEach((lm, i) => { const d = Math.hypot(lm[0].x - ex, lm[0].y - ey); if (d < bd) { bd = d; best = i; } });
+    if (best < 0 || bd > 0.35) continue;
+    const w = new Float32Array(63), img = new Float32Array(42);
+    res.worldLandmarks[best].forEach((p, i) => { w[i*3] = p.x; w[i*3+1] = p.y; w[i*3+2] = p.z; });
+    res.landmarks[best].forEach((p, i) => { img[i*2] = (c.sx + p.x * c.size) / vw; img[i*2+1] = (c.sy + p.y * c.size) / vh; });
+    return { w, img, box: [c.sx / vw, c.sy / vh, c.size / vw, c.size / vh] };
+  }
+  return null;
+}
+
+async function trackVideo() {
+  if (!videoEl.src || !avatar) { setStatus('Carregue vídeo e avatar.'); return; }
+  await prepareVideo();
+  playing = false; $('playBtn').textContent = '▶ Reproduzir';
+  const fps = +$('fpsSel').value, dur = videoEl.duration, N = Math.floor(dur * fps);
+  const modelKey = $('poseModel').value;
+
+  if (_currentVideoFile) {
+    const key = cacheKey(_currentVideoFile, modelKey);
+    setStatus('Verificando cache...');
+    const cached = await cacheLoad(key);
+    if (cached) {
+      log(`Cache encontrado para ${_currentVideoFile.name} [${modelKey}] — pulando MediaPipe.`);
+      track = deserializeTrack(cached);
+      setStatus('Dados carregados do cache. Aplicando retargeting...');
+      applyTracking();
+      return;
+    }
+  }
+
+  setStatus('Carregando modelos do MediaPipe (1ª vez baixa ~15–30 MB)...');
+  const T = await createTrackers(modelKey, $('faceChk').checked);
+  track = { fps, N, w: videoEl.videoWidth, h: videoEl.videoHeight,
+            pose: new Array(N).fill(null), handL: new Array(N).fill(null), handR: new Array(N).fill(null),
+            draw: new Array(N).fill(null), contact: new Array(N).fill(null), depth: new Array(N).fill(null), hasFace: !!T.face };
+  let okP = 0, okL = 0, okR = 0, okF = 0;
+  const t0 = performance.now();
+  for (let i = 0; i < N; i++) {
+    await seekTo(videoEl, i / fps);
+    await new Promise(r => setTimeout(r, 40));
+    const vw = videoEl.videoWidth, vh = videoEl.videoHeight;
+    const pr = T.pose.detectForVideo(videoEl, Math.round((i / fps) * 1000));
+    const d = { arms: null, L: null, R: null, boxes: [] };
+    const handZ = { L: NaN, R: NaN }, FOC = focalGuess(vw, vh);
+    if (pr.landmarks?.length && pr.worldLandmarks?.length) {
+      okP++;
+      const wl = pr.worldLandmarks[0], il = pr.landmarks[0];
+      const a = new Float32Array(132);
+      wl.forEach((p, k) => { a[k*4] = p.x; a[k*4+1] = p.y; a[k*4+2] = p.z; a[k*4+3] = p.visibility ?? 1; });
+      track.pose[i] = a;
+      d.arms = [11,12,13,14,15,16].map(k => [il[k].x, il[k].y]);
+      const px = k => ({ x: il[k].x * vw, y: il[k].y * vh });
+      const sides = [['L', 11, 13, 15, 'handL'], ['R', 12, 14, 16, 'handR']];
+      for (const [tag, sh, el, wr, store] of sides) {
+        if ((il[wr].visibility ?? 1) < 0.2) continue;
+        const wp = px(wr), ep = px(el), sp = px(sh);
+        const h = detectHand(T.hand, videoEl, wp, ep, Math.hypot(ep.x - sp.x, ep.y - sp.y));
+        if (h) { track[store][i] = h.w; d[tag] = h.img; d.boxes.push(h.box); tag === 'L' ? okL++ : okR++; handZ[tag] = handDepth(h.w, h.img, vw, vh, FOC); }
+      }
+    }
+    if (T.face && track.pose[i]) {
+      const fr = T.face.detectForVideo(videoEl, Math.round((i / fps) * 1000));
+      const fl = fr.faceLandmarks?.[0];
+      if (fl) {
+        okF++;
+        const A = FACE_IDX.map(k => fl[k]);
+        const fw = Math.hypot((fl[234].x - fl[454].x) * vw, (fl[234].y - fl[454].y) * vh);
+        d.face = Float32Array.from(A.flatMap(a => [a.x, a.y]));
+        const wl = track.pose[i], entry = { L: null, R: null }, Zf = faceDepth(fw, FOC);
+        track.depth[i] = { f: Zf, L: handZ.L, R: handZ.R };
+        for (const [tag, wr, img] of [['L', 15, d.L], ['R', 16, d.R]]) {
+          const il = d.arms; if (!il) continue;
+          const pts = [];
+          if (img) for (let k = 0; k < 21; k++) pts.push([img[k*2] * vw, img[k*2+1] * vh]);
+          else { const q = il[tag === 'L' ? 4 : 5]; pts.push([q[0] * vw, q[1] * vh]); }
+          const dd = new Float32Array(6).fill(9), kk = new Uint8Array(6);
+          A.forEach((a, ai) => pts.forEach((pt, k) => {
+            const dist = Math.hypot(pt[0] - a.x * vw, pt[1] - a.y * vh) / fw;
+            if (dist < dd[ai]) { dd[ai] = dist; kk[ai] = img ? k : 0; }
+          }));
+          entry[tag] = { d: dd, k: kk, dz: Math.abs(wl[wr*4 + 2] - wl[2]), dzS: Number.isFinite(handZ[tag]) ? Math.abs(handZ[tag] - Zf) : NaN };   // diferença de profundidade punho↔nariz
+        }
+        track.contact[i] = entry;
+      }
+    }
+    track.draw[i] = d;
+    drawPreview(i);
+    if (i % 3 === 0) {
+      const el = (performance.now() - t0) / 1000, eta = el / (i + 1) * (N - i - 1);
+      setStatus(`Rastreando ${i + 1}/${N} — faltam ~${eta.toFixed(0)} s`);
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+  T.pose.close(); T.hand.close(); T.face?.close();
+  const pc = n => (100 * n / N).toFixed(0) + '%';
+  log(`Rastreio concluído: corpo ${pc(okP)} | mão esq. ${pc(okL)} | mão dir. ${pc(okR)}` + (track.hasFace ? ` | rosto ${pc(okF)}` : ''));
+  if (okL + okR < N * 0.2) log('⚠ Poucas mãos detectadas. Tente o modelo "Heavy", boa iluminação, mãos sem desfoque e fundo contrastante.');
+
+  if (_currentVideoFile) {
+    const key = cacheKey(_currentVideoFile, modelKey);
+    setStatus('Salvando no cache...');
+    await cacheSave(key, serializeTrack(track));
+  }
+
+  applyTracking();
+}
+
+/* ---------- Suavização (gaussiana, não-causal: sem atraso e sem perder picos) ---------- */
+function gaussSmooth(samples, dim, sigma) {
+  const N = samples.length, out = new Array(N).fill(null);
+  sigma = Math.max(sigma, 0.01);
+  const R = Math.max(1, Math.ceil(sigma * 3)), wts = []; let full = 0;
+  for (let k = -R; k <= R; k++) { const w = Math.exp(-0.5 * (k / sigma) ** 2); wts.push(w); full += w; }
+  for (let i = 0; i < N; i++) {
+    const acc = new Float32Array(dim); let W = 0;
+    for (let k = -R; k <= R; k++) {
+      const s = samples[i + k]; if (!s) continue;
+      const w = wts[k + R]; W += w;
+      for (let d = 0; d < dim; d++) acc[d] += s[d] * w;
+    }
+    if (W > 0.02 * full) { for (let d = 0; d < dim; d++) acc[d] /= W; out[i] = { data: acc, c: Math.min(1, W / (0.45 * full)) }; }
+  }
+  return out;
+}
+
+/* MediaPipe → mundo three.js.  MP: x→direita da imagem, y→BAIXO, z→para longe da câmera.
+ * three: (x, -y, -z).  É uma rotação própria (det=+1), então não espelha nada.
+ * A pessoa de frente para a câmera olha para +Z, igual ao avatar. */
+const MIRROR_IDX = (() => {
+  const a = [...Array(33).keys()];
+  for (const [i, j] of [[1,4],[2,5],[3,6],[7,8],[9,10],[11,12],[13,14],[15,16],[17,18],[19,20],[21,22],[23,24],[25,26],[27,28],[29,30],[31,32]]) { a[i] = j; a[j] = i; }
+  return a;
+})();
+
+function buildSamples(mirror) {
+  const sx = mirror ? -1 : 1, N = track.N, poseS = [], LS = [], RS = [];
+  const conv = h => {
+    if (!h) return null;
+    const o = new Float32Array(63);
+    for (let k = 0; k < 21; k++) { o[k*3] = sx * h[k*3]; o[k*3+1] = -h[k*3+1]; o[k*3+2] = -h[k*3+2]; }
+    return o;
+  };
+  for (let i = 0; i < N; i++) {
+    const p = track.pose[i];
+    if (!p) poseS.push(null);
+    else {
+      const o = new Float32Array(132);
+      for (let k = 0; k < 33; k++) {
+        const s = (mirror ? MIRROR_IDX[k] : k) * 4;
+        o[k*4] = sx * p[s]; o[k*4+1] = -p[s+1]; o[k*4+2] = -p[s+2]; o[k*4+3] = p[s+3];
+      }
+      poseS.push(o);
+    }
+    const hl = conv(track.handL[i]), hr = conv(track.handR[i]);
+    if (mirror) { LS.push(hr); RS.push(hl); } else { LS.push(hl); RS.push(hr); }
+  }
+  return { poseS, LS, RS };
+}
+
+const ANCH_NAME = ['testa', 'nariz', 'boca', 'queixo', 'bochecha', 'bochecha'];
+function smooth1D(arr, sigma) {
+  const N = arr.length, out = new Float32Array(N); sigma = Math.max(sigma, 0.01);
+  const R = Math.max(1, Math.ceil(sigma * 3)), w = []; let full = 0;
+  for (let k = -R; k <= R; k++) { const v = Math.exp(-0.5 * (k / sigma) ** 2); w.push(v); full += v; }
+  for (let i = 0; i < N; i++) { let a = 0; for (let k = -R; k <= R; k++) { const j = i + k; if (j >= 0 && j < N) a += arr[j] * w[k + R]; } out[i] = a / full; }
+  return out;
+}
+/* Eventos de contato (mão↔rosto) por frame; o limiar é reaplicável sem rastrear de novo. */
+function buildContacts(mirror, eps, sigma) {
+  const N = track.N, out = Array.from({ length: N }, () => ({ left: null, right: null }));
+  track.contactTxt = new Array(N).fill('');
+  if (!track.hasFace) return out;
+  const ev = { left: new Array(N).fill(null), right: new Array(N).fill(null) };
+  const counts = { left: {}, right: {} };
+  for (let i = 0; i < N; i++) {
+    const c = track.contact[i]; if (!c) continue;
+    for (const raw of ['L', 'R']) {
+      const e = c[raw]; if (!e || (Number.isFinite(e.dzS) ? e.dzS : e.dz) > 0.30) continue;
+      let best = -1, bd = 1e9;
+      for (let a = 0; a < 6; a++) if (e.d[a] < eps && e.d[a] < bd) { bd = e.d[a]; best = a; }
+      if (best < 0) continue;
+      const side = ((raw === 'L') !== mirror) ? 'left' : 'right';
+      const key = best < 4 ? ['forehead', 'nose', 'mouth', 'chin'][best]
+                : (best === 4) === mirror ? 'cheekL' : 'cheekR';   // 234 = borda esquerda da IMAGEM
+      ev[side][i] = { key, k: e.k[best], name: ANCH_NAME[best] };
+      counts[side][ANCH_NAME[best]] = (counts[side][ANCH_NAME[best]] || 0) + 1;
+    }
+  }
+  const sg = Math.max(sigma, 1.5);                      // rampa de entrada/saída do contato ≈ 3–5 frames
+  const R = Math.max(1, Math.ceil(sg * 3));
+  for (const side of ['left', 'right']) {
+    const w = smooth1D(Float32Array.from(ev[side], e => e ? 1 : 0), sg);
+    for (let i = 0; i < N; i++) {
+      if (w[i] < 0.02) continue;
+      let src = null, bj = 1e9;
+      for (let j = Math.max(0, i - R); j <= Math.min(N - 1, i + R); j++) if (ev[side][j] && Math.abs(j - i) < bj) { bj = Math.abs(j - i); src = ev[side][j]; }
+      if (src) {
+        out[i][side] = { w: Math.min(1, w[i] * 1.2), key: src.key, k: src.k };
+        track.contactTxt[i] += ` ${side === 'left' ? 'E' : 'D'}→${src.name}(${(Math.min(1, w[i] * 1.2) * 100).toFixed(0)}%)`;
+      }
+    }
+  }
+  const fmt = c => Object.entries(c).map(([k, v]) => `${k}×${v}`).join(' ') || '—';
+  log(`Contatos com o rosto — mão esq.: ${fmt(counts.left)} | mão dir.: ${fmt(counts.right)}`);
+  return out;
+}
+
+function smoothMasked(vals, sigma) {          // gaussiana ignorando NaN; devolve valor e confiança
+  const N = vals.length, v = new Float32Array(N).fill(NaN), c = new Float32Array(N);
+  sigma = Math.max(sigma, 0.01);
+  const R = Math.max(1, Math.ceil(sigma * 3)), w = []; let full = 0;
+  for (let k = -R; k <= R; k++) { const x = Math.exp(-0.5 * (k / sigma) ** 2); w.push(x); full += x; }
+  for (let i = 0; i < N; i++) {
+    let num = 0, W = 0;
+    for (let k = -R; k <= R; k++) { const j = i + k; if (j < 0 || j >= N || !Number.isFinite(vals[j])) continue; num += vals[j] * w[k + R]; W += w[k + R]; }
+    if (W > 0.02 * full) { v[i] = num / W; c[i] = Math.min(1, W / (0.45 * full)); }
+  }
+  return { v, c };
+}
+/* Profundidade relativa mão↔rosto a partir do tamanho aparente de cada um (em metros, sinal já em eixo three: longe = −Z). */
+function buildZFix(mirror, sigma, beta) {
+  const N = track.N, out = Array.from({ length: N }, () => ({ left: null, right: null }));
+  if (!track.hasFace || beta <= 0) return out;
+  const Zf = new Float32Array(N).fill(NaN), ZL = new Float32Array(N).fill(NaN), ZR = new Float32Array(N).fill(NaN);
+  for (let i = 0; i < N; i++) { const d = track.depth[i]; if (d) { Zf[i] = d.f; ZL[i] = d.L; ZR[i] = d.R; } }
+  const sf = smoothMasked(Zf, sigma * 1.5);
+  const sides = { left: smoothMasked(mirror ? ZR : ZL, sigma), right: smoothMasked(mirror ? ZL : ZR, sigma) };
+  let used = 0;
+  for (let i = 0; i < N; i++) for (const side of ['left', 'right']) {
+    const h = sides[side];
+    if (!Number.isFinite(sf.v[i]) || !Number.isFinite(h.v[i])) continue;
+    const dz = Math.max(-0.6, Math.min(0.6, -(h.v[i] - sf.v[i])));
+    out[i][side] = { dz, k: Math.min(sf.c[i], h.c[i]) * beta };
+    used++;
+  }
+  log(`Profundidade por tamanho aplicada em ${(100 * used / (2 * N)).toFixed(0)}% das amostras mão×frame (peso ${beta.toFixed(2)}).`);
+  return out;
+}
+
+function applyTracking() {
+  if (!track || !avatar) return;
+  const fps = track.fps, sigma = (+$('smooth').value / 1000) * fps;
+  const { poseS, LS, RS } = buildSamples($('mirror').checked);
+  const sp = gaussSmooth(poseS, 132, sigma);
+  const sl = gaussSmooth(LS, 63, sigma * 0.8);
+  const sr = gaussSmooth(RS, 63, sigma * 0.8);
+  const mkHand = s => {
+    if (!s) return null;
+    const H = []; for (let k = 0; k < 21; k++) H.push(V3(s.data[k*3], s.data[k*3+1], s.data[k*3+2]));
+    return { H, c: s.c };
+  };
+  // proporções: escala do braço da pessoa para o do avatar (mediana ao longo do vídeo)
+  const med = a => { if (!a.length) return 0; a = [...a].sort((x, y) => x - y); return a[a.length >> 1]; };
+  const prop = { left: {}, right: {}, hand: {} };
+  for (const s of ['left', 'right']) {
+    const L = POSE_ARM_LM[s], hs = s === 'left' ? sl : sr, lens = [], hl = [];
+    for (let i = 0; i < track.N; i++) {
+      const p = sp[i]; if (!p) continue;
+      const g = k => V3(p.data[k*4], p.data[k*4+1], p.data[k*4+2]);
+      lens.push(g(L.sh).distanceTo(g(L.el)) + g(L.el).distanceTo(g(L.wr)));
+      const h = hs[i];
+      if (h && h.c > 0.8) hl.push(V3(h.data[27], h.data[28], h.data[29]).distanceTo(V3(h.data[0], h.data[1], h.data[2])));
+    }
+    const g = armGeo[s];
+    prop[s].scale = g && med(lens) > 0 ? (g.U + g.F) / med(lens) : 1;
+    prop.hand[s] = g && g.H && hl.length ? g.H / med(hl) : 1;
+  }
+  log(`Escala de braço (avatar/pessoa): esq ${prop.left.scale.toFixed(2)} | dir ${prop.right.scale.toFixed(2)}`);
+  const contacts = buildContacts($('mirror').checked, +$('eps').value, sigma);
+  const zfix = buildZFix($('mirror').checked, sigma, +$('zw').value);
+
+  const holds = $('holdChk').checked ? { left: new HandHold('left', fps), right: new HandHold('right', fps) } : null;
+  const snaps = []; let last = null;
+  for (let i = 0; i < track.N; i++) {
+    const p = sp[i];
+    if (p) {
+      const P = [], vis = [];
+      for (let k = 0; k < 33; k++) { P.push(V3(p.data[k*4], p.data[k*4+1], p.data[k*4+2])); vis.push(p.data[k*4+3]); }
+      retargetHeld({ P, vis, left: mkHand(sl[i]), right: mkHand(sr[i]), prop, contact: contacts[i], zFix: zfix[i], opts: { zBias: $('biasChk').checked, collide: $('collChk').checked, limits: $('limChk').checked } }, holds);
+      last = snapshotDriven();
+    }
+    snaps.push(last);                       // sem pessoa no frame → mantém a última pose
+  }
+  if (holds) {
+    const f = h => `${(100 * h.stats.frozen / Math.max(1, h.stats.total)).toFixed(0)}% congelada em ${h.stats.episodes} episódio(s), ${h.stats.dead} frame(s) com punho extrapolado`;
+    log(`Persistência — mão esq.: ${f(holds.left)} | mão dir.: ${f(holds.right)}`);
+  }
+  const first = snaps.find(s => s);
+  if (!first) { setStatus('Nenhuma pessoa detectada no vídeo.'); return; }
+  for (let i = 0; i < snaps.length; i++) if (!snaps[i]) snaps[i] = first;
+  anim = { fps, N: track.N, snaps };
+  $('timeRange').max = track.N - 1; $('timeline').style.display = 'block';
+  $('exportBtn').disabled = false; $('playBtn').disabled = false;
+  setStatus(`Pronto: ${track.N} frames. Reproduza para conferir; mude "Vídeo espelhado" ou "Suavização" para reaplicar sem rastrear de novo.`);
+  playT = 0; setPlayFrame(0); playing = true; $('playBtn').textContent = '⏸ Pausar';
+}
+
+/* ---------- Reprodução ---------- */
+const _qa = new THREE.Quaternion(), _qb = new THREE.Quaternion();
+function setPlayFrame(tSec) {
+  if (!anim) return;
+  const fi = Math.min(Math.max(tSec * anim.fps, 0), anim.N - 1);
+  const i0 = Math.floor(fi), i1 = Math.min(i0 + 1, anim.N - 1), f = fi - i0;
+  const A = anim.snaps[i0], Bq = anim.snaps[i1];
+  driven.forEach((b, j) => {
+    _qa.fromArray(A, j * 4); _qb.fromArray(Bq, j * 4);
+    b.quaternion.copy(_qa.slerp(_qb, f));
+  });
+  $('timeRange').value = Math.round(fi);
+  drawPreview(Math.round(fi), true);
+}
+
+/* ---------- Pré-visualização do rastreio (vídeo + esqueleto) ---------- */
+const pv = $('pv'), pvc = pv.getContext('2d');
+const HAND_CONN = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
+let pvSeekBusy = false;
+function paintPreview(i) {
+  const d = track?.draw[i]; if (!d) return;
+  const W = pv.width, H = pv.height;
+  pvc.drawImage(videoEl, 0, 0, W, H);
+  if (d.arms) {
+    pvc.strokeStyle = '#0066ff'; pvc.lineWidth = 2;
+    for (const [a, b, c] of [[0, 2, 4], [1, 3, 5]]) {
+      pvc.beginPath(); pvc.moveTo(d.arms[a][0]*W, d.arms[a][1]*H); pvc.lineTo(d.arms[b][0]*W, d.arms[b][1]*H); pvc.lineTo(d.arms[c][0]*W, d.arms[c][1]*H); pvc.stroke();
+    }
+    pvc.beginPath(); pvc.moveTo(d.arms[0][0]*W, d.arms[0][1]*H); pvc.lineTo(d.arms[1][0]*W, d.arms[1][1]*H); pvc.stroke();
+  }
+  pvc.strokeStyle = '#ff0'; pvc.lineWidth = 1;
+  for (const b of d.boxes) pvc.strokeRect(b[0]*W, b[1]*H, b[2]*W, b[3]*H);
+  for (const [img, col] of [[d.R, '#0ff'], [d.L, '#f0f']]) {
+    if (!img) continue;
+    pvc.strokeStyle = col; pvc.fillStyle = col; pvc.lineWidth = 1.5;
+    for (const [a, b] of HAND_CONN) { pvc.beginPath(); pvc.moveTo(img[a*2]*W, img[a*2+1]*H); pvc.lineTo(img[b*2]*W, img[b*2+1]*H); pvc.stroke(); }
+    for (let k = 0; k < 21; k++) pvc.fillRect(img[k*2]*W - 1.5, img[k*2+1]*H - 1.5, 3, 3);
+  }
+  if (d.face) { pvc.fillStyle = '#0f8'; for (let a = 0; a < 6; a++) pvc.fillRect(d.face[a*2]*W - 2, d.face[a*2+1]*H - 2, 4, 4); }
+  $('pvInfo').textContent = `frame ${i + 1}/${track.N} — azul: braços | azul ciano: mão dir. | rosa: mão esq. | verde: âncoras do rosto` + (track.contactTxt?.[i] ? ` |${track.contactTxt[i]}` : '');
+}
+function drawPreview(i, fromPlayback = false) {
+  if (!track) return;
+  pv.height = Math.round(pv.width * (track.h / track.w));
+  if (!fromPlayback) { paintPreview(i); return; }
+  const t = i / track.fps;                          // durante a reprodução, acompanha o vídeo
+  if (pvSeekBusy || Math.abs(videoEl.currentTime - t) < 0.5 / track.fps) { paintPreview(i); return; }
+  pvSeekBusy = true;
+  videoEl.addEventListener('seeked', () => { pvSeekBusy = false; paintPreview(i); }, { once: true });
+  videoEl.currentTime = Math.min(t, videoEl.duration - 0.001);
+}
+
+/* ---------- Exportação ---------- */
+function exportGLB() {
+  if (!anim) return;
+  setStatus('Exportando...');
+  const times = new Float32Array(anim.N);
+  for (let i = 0; i < anim.N; i++) times[i] = i / anim.fps;
+  const tracks = driven.map((b, j) => {
+    const vals = new Float32Array(anim.N * 4);
+    for (let i = 0; i < anim.N; i++) for (let k = 0; k < 4; k++) vals[i*4 + k] = anim.snaps[i][j*4 + k];
+    return new THREE.QuaternionKeyframeTrack(`${b.uuid}.quaternion`, times, vals);
+  });
+  const clip = new THREE.AnimationClip('mocap', times[anim.N - 1], tracks);
+  resetPose();                                      // exporta em pose de repouso + clipe
+  new GLTFExporter().parse(avatar, glb => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([glb], { type: 'model/gltf-binary' }));
+    a.download = 'avatar-animado.glb'; a.click();
+    setStatus('GLB exportado! Veja em Downloads.');
+    setPlayFrame(playT);
+  }, err => { log('Erro export: ' + err); setStatus('Erro na exportação.'); }, { binary: true, animations: [clip] });
+}
+
+/* ---------- UI ---------- */
+function updateBtn() {
+  $('trackBtn').disabled = !(videoEl.readyState >= 1 && videoEl.duration > 0 && avatar);
+  $('flipBtn').disabled = !avatar;
+  $('calBtn').disabled = !avatar;
+}
+async function loadVideoFile(f) {
+  const attempts = [
+    ['blob', async () => URL.createObjectURL(f)],
+    ['data', async () => { setStatus('Lendo o vídeo na memória (plano B)...'); return await readDataURL(f); }],
+  ];
+  let lastErr = null;
+  for (const [name, mk] of attempts) {
+    try {
+      const url = await mk();
+      if (name === 'blob' && !/^blob:/.test(url)) { log(`createObjectURL devolveu "${url.slice(0, 20)}..." (não é blob:) → pulando para o plano B`); continue; }
+      videoEl.removeAttribute('src'); videoEl.src = url; videoEl.load();
+      await prepareVideo();
+      log(`Vídeo carregado via ${name}.`);
+      return;
+    } catch (e) { lastErr = e; log(`Tentativa "${name}" falhou: ${e.message.split('.')[0]}`); }
+  }
+  const t = f.type || '(tipo desconhecido)';
+  throw new Error(`${lastErr.message}\nArquivo: ${f.name}, ${t}, ${(f.size/1e6).toFixed(1)} MB. canPlayType H.264="${videoEl.canPlayType('video/mp4; codecs="avc1.42E01E"')}", H.265="${videoEl.canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"')}"`);
+}
+$('videoInput').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  _currentVideoFile = f;
+  track = null; anim = null; playing = false; updateBtn();
+  try {
+    await loadVideoFile(f);
+    await seekTo(videoEl, 0.01);
+    pv.height = Math.round(pv.width * videoEl.videoHeight / videoEl.videoWidth);
+    pvc.drawImage(videoEl, 0, 0, pv.width, pv.height);
+    $('pvInfo').textContent = `Vídeo carregado: ${videoEl.videoWidth}×${videoEl.videoHeight}, ${videoEl.duration.toFixed(1)} s`;
+    setStatus(`Vídeo pronto (${videoEl.duration.toFixed(1)} s).`);
+    updateBtn();
+
+    const modelKey = $('poseModel').value;
+    const key = cacheKey(f, modelKey);
+    const cached = await cacheLoad(key);
+    if (cached) {
+      log(`Cache encontrado para ${f.name} [${modelKey}].`);
+      track = deserializeTrack(cached);
+      if (avatar) {
+        setStatus('Dados carregados do cache. Aplicando retargeting...');
+        applyTracking();
+      } else {
+        setStatus(`Vídeo pronto (${videoEl.duration.toFixed(1)} s) — Cache encontrado! Carregue o avatar para aplicar.`);
+      }
+    }
+  } catch (err) { log('⚠ ' + err.message); setStatus('Erro no vídeo (veja o log).'); }
+});
+$('avatarInput').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    await loadAvatar(await f.arrayBuffer());
+    setStatus('Avatar carregado e orientado.');
+    updateBtn();
+    if (track) {
+      applyTracking();
+    } else if (_currentVideoFile) {
+      const modelKey = $('poseModel').value;
+      const key = cacheKey(_currentVideoFile, modelKey);
+      const cached = await cacheLoad(key);
+      if (cached) {
+        log(`Cache encontrado para ${_currentVideoFile.name} [${modelKey}] — aplicando no avatar.`);
+        track = deserializeTrack(cached);
+        setStatus('Dados do cache aplicados ao avatar.');
+        applyTracking();
+      }
+    }
+  }
+  catch (err) { log('Erro: ' + err); setStatus('Erro no avatar.'); }
+});
+$('trackBtn').addEventListener('click', async () => {
+  $('trackBtn').disabled = true;
+  try { await trackVideo(); } catch (e) { log('Erro: ' + (e.message || e)); console.error(e); setStatus('Erro no rastreio (veja o log).'); }
+  updateBtn();
+});
+$('playBtn').addEventListener('click', () => { playing = !playing; $('playBtn').textContent = playing ? '⏸ Pausar' : '▶ Reproduzir'; });
+$('timeRange').addEventListener('input', e => { playing = false; $('playBtn').textContent = '▶ Reproduzir'; playT = (+e.target.value) / anim.fps; setPlayFrame(playT); });
+$('exportBtn').addEventListener('click', exportGLB);
+$('calBtn').addEventListener('click', startCalibration);
+$('markersChk').addEventListener('change', () => {});
+$('eps').addEventListener('input', e => { $('epsVal').textContent = (+e.target.value).toFixed(2); });
+$('eps').addEventListener('change', () => track && applyTracking());
+$('zw').addEventListener('input', e => { $('zwVal').textContent = (+e.target.value).toFixed(1); });
+$('zw').addEventListener('change', () => track && applyTracking());
+$('biasChk').addEventListener('change', () => track && applyTracking());
+$('collChk').addEventListener('change', () => track && applyTracking());
+$('limChk').addEventListener('change', () => track && applyTracking());
+$('holdChk').addEventListener('change', () => track && applyTracking());
+$('flipBtn').addEventListener('click', () => { rotateAvatarY180(); if (track) applyTracking(); log('Avatar girado 180°.'); });
+$('mirror').addEventListener('change', () => track && applyTracking());
+$('smooth').addEventListener('input', e => { $('smoothVal').textContent = e.target.value + ' ms'; });
+$('smooth').addEventListener('change', () => track && applyTracking());
+$('resetBtn').addEventListener('click', () => {
+  playing = false; anim = null; track = null;
+  if (avatar) resetPose();
+  $('timeline').style.display = 'none'; $('exportBtn').disabled = true; $('playBtn').disabled = true;
+  pvc.clearRect(0, 0, pv.width, pv.height); setStatus('Resetado.');
+});
+$('clearCacheBtn').addEventListener('click', async e => {
+  await window.clearTrackCache(e.shiftKey);
+});
+
+/* ---------- Console ---------- */
+window.showBones   = () => console.log(Object.keys(bones));
+window.showMapping = () => console.log(mapping);
+window.remap = (logical, boneName) => {
+  if (!bones[boneName]) { log(`Osso "${boneName}" não existe. Use showBones().`); return; }
+  remapBone(logical, boneName); log(`remap ${logical} → ${boneName}`); if (track) applyTracking();
+};
+window.resetAnchors = () => { resetAnchors(); clearMarkers(); if (track) applyTracking(); };
+window.diagnoseAvatar = () => {
+  if (!avatar) return console.log('Nenhum avatar carregado.');
+  console.log({ mapping, animados: driven.map(b => b.name), tronco: rig.torso.map(b => b.name) });
+};
+window.clearTrackCache = async (all) => {
+  const db = await openDB();
+  const tx = db.transaction(STORE, 'readwrite');
+  if (all) {
+    tx.objectStore(STORE).clear();
+    log('Cache limpo por completo.');
+  } else if (_currentVideoFile) {
+    const key = cacheKey(_currentVideoFile, $('poseModel').value);
+    tx.objectStore(STORE).delete(key);
+    log('Cache do vídeo atual removido.');
+  } else { log('Nenhum vídeo carregado para limpar do cache.'); }
+};
+
+/* ---------- Loop de render ---------- */
+(function animate() {
+  requestAnimationFrame(animate);
+  const now = performance.now(), dt = (now - lastTick) / 1000; lastTick = now;
+  if (playing && anim) {
+    playT += dt;
+    if (playT > (anim.N - 1) / anim.fps) playT = 0;
+    setPlayFrame(playT);
+  }
+  updateMarkers();
+  controls.update();
+  renderer.render(scene, camera);
+})();
+
+if (!urlInfo.native) log(urlInfo.patched ? 'ℹ createObjectURL do ambiente estava alterado; restaurei o nativo.' : '⚠ createObjectURL do ambiente é não-padrão e não consegui restaurar. Texturas podem falhar; o vídeo usará o plano B. Abra o arquivo direto no Chrome/Edge via http://localhost.');
+setStatus('Pronto. Carregue um vídeo e um avatar (.glb em T-pose ou A-pose).');
+</script>
+</body>
+</html>
