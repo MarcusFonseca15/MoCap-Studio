@@ -1623,13 +1623,101 @@ function detectHand(hand, v, wrist, elbow, upperLen) {
   return null;
 }
 
+/* =====================================================================
+ *  CACHE DO RASTREIO (IndexedDB)
+ *  Chave = impressão do vídeo (tamanho + duração + dimensões + hash de 3 trechos do conteúdo) + FPS + modelo de pose + rosto.
+ *  Renomear/copiar o arquivo não muda a chave; um vídeo diferente ou outros parâmetros de análise, sim.
+ *  Guarda só os dados BRUTOS do MediaPipe; suavização, limites, colisão e edições são recalculados em segundos.
+ * ===================================================================== */
+const TRACK_SCHEMA = 2, DB_NAME = 'mocap-studio', DB_STORE = 'tracks', CACHE_MAX = 12;
+let videoFile = null;
+function idbOpen() {
+  return new Promise((res, rej) => {
+    if (typeof indexedDB === 'undefined') return rej(new Error('IndexedDB indisponível neste navegador/contexto'));
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = () => { const st = r.result.createObjectStore(DB_STORE, { keyPath: 'key' }); st.createIndex('savedAt', 'savedAt'); };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+    r.onblocked = () => rej(new Error('banco bloqueado por outra aba'));
+  });
+}
+const idbReq = rq => new Promise((res, rej) => { rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error); });
+const idbDone = tx => new Promise((res, rej) => { tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error || new Error('transação abortada')); });
+async function cacheGet(key) {
+  const db = await idbOpen();
+  try { return await idbReq(db.transaction(DB_STORE).objectStore(DB_STORE).get(key)); } finally { db.close(); }
+}
+async function cachePut(rec) {
+  const db = await idbOpen();
+  try {
+    const tx = db.transaction(DB_STORE, 'readwrite'), st = tx.objectStore(DB_STORE);
+    st.put(rec);
+    const n = await idbReq(st.count());
+    if (n > CACHE_MAX) {                                   // mantém só os mais recentes
+      let extra = n - CACHE_MAX;
+      await new Promise((res, rej) => {
+        const cur = st.index('savedAt').openKeyCursor();
+        cur.onsuccess = () => { const c = cur.result; if (c && extra > 0) { st.delete(c.primaryKey); extra--; c.continue(); } else res(); };
+        cur.onerror = () => rej(cur.error);
+      });
+    }
+    await idbDone(tx);
+  } finally { db.close(); }
+}
+async function cacheClear() {
+  const db = await idbOpen();
+  try { const tx = db.transaction(DB_STORE, 'readwrite'); tx.objectStore(DB_STORE).clear(); await idbDone(tx); } finally { db.close(); }
+}
+function fnv1a(u8, seed) { let h = seed >>> 0; for (let i = 0; i < u8.length; i++) { h ^= u8[i]; h = Math.imul(h, 16777619) >>> 0; } return h >>> 0; }
+async function videoFingerprint(file) {                    // hash de início, meio e fim (≈768 KB): rápido mesmo em vídeos grandes
+  const CH = 256 * 1024, size = file.size, mid = size >> 1;
+  const parts = [file.slice(0, CH), file.slice(Math.max(0, mid - CH / 2), mid + CH / 2), file.slice(Math.max(0, size - CH))];
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (const p of parts) { const u8 = new Uint8Array(await p.arrayBuffer()); h1 = fnv1a(u8, h1); h2 = fnv1a(u8, (h2 ^ 0x9e3779b9) >>> 0); }
+  return h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');
+}
+const cacheKey = (fp, fps) => `v${TRACK_SCHEMA}|${videoFile?.size ?? 0}|${fp}|${videoEl.duration.toFixed(3)}|${videoEl.videoWidth}x${videoEl.videoHeight}|fps${fps}|${$('poseModel').value}|face${+$('faceChk').checked}`;
+function trackFromCache(r, fps, N) {                       // valida antes de confiar: formato, tamanho e comprimento dos vetores
+  if (!r || r.schema !== TRACK_SCHEMA || r.N !== N || r.fps !== fps) return null;
+  for (const k of ['pose', 'handL', 'handR', 'draw', 'depth']) if (!Array.isArray(r[k]) || r[k].length !== N) return null;
+  if (r.pose.some(a => a && a.length !== 132) || r.handL.some(a => a && a.length !== 63) || r.handR.some(a => a && a.length !== 63)) return null;
+  return { fps, N, w: r.w, h: r.h, pose: r.pose, handL: r.handL, handR: r.handR, draw: r.draw, depth: r.depth, hasFace: !!r.hasFace, key: r.key };
+}
+async function cacheSaveTrack(key) {                      // só dados BRUTOS do MediaPipe; falhas viram uma linha no log, nunca interrompem
+  if (!key || !track) return false;
+  try {
+    await cachePut({ key, schema: TRACK_SCHEMA, savedAt: Date.now(), videoName: videoFile?.name ?? '', size: videoFile?.size ?? 0, fps: track.fps, N: track.N, w: track.w, h: track.h,
+                     hasFace: track.hasFace, pose: track.pose, handL: track.handL, handR: track.handR, draw: track.draw, depth: track.depth });
+    return true;
+  } catch (e) { log('⚠ Cache: não consegui salvar (' + (e.name === 'QuotaExceededError' ? 'sem espaço no navegador' : (e.message || e)) + ').'); return false; }
+}
+function resetEditsForNewTrack() {
+  if ((edits.pins.length + edits.tracks.length) && !confirm('Trocar o rastreio apaga os pontos fixos e ajustes criados. Continuar?')) return false;
+  edits.pins.length = 0; edits.tracks.length = 0; sel.a = sel.b = null; exitEdit(true);
+  playing = false; $('playBtn').textContent = '▶ Reproduzir';
+  return true;
+}
+
 async function trackVideo() {
   if (!videoEl.src || !avatar) { setStatus('Carregue vídeo e avatar.'); return; }
   await prepareVideo();
-  if ((edits.pins.length + edits.tracks.length) && !confirm('Rastrear de novo apaga os pontos fixos e ajustes criados. Continuar?')) return;
-  edits.pins.length = 0; edits.tracks.length = 0; sel.a = sel.b = null; exitEdit(true);
-  playing = false; $('playBtn').textContent = '▶ Reproduzir';
   const fps = +$('fpsSel').value, dur = videoEl.duration, N = Math.floor(dur * fps);
+  let key = null;
+  if (videoFile) { try { key = cacheKey(await videoFingerprint(videoFile), fps); } catch (e) { log('Cache: não consegui identificar o vídeo (' + (e.message || e) + '); rastreando do zero.'); } }
+  if (key && track && track.key === key) { applyTracking(); return; }      // já rastreado nesta sessão: reaplica e MANTÉM as edições
+  if (key) {
+    try {
+      setStatus('Procurando este vídeo no cache...');
+      const rec = trackFromCache(await cacheGet(key), fps, N);
+      if (rec) {
+        if (!resetEditsForNewTrack()) return;
+        track = rec;
+        log(`💾 Rastreio recuperado do cache (${N} frames).`);
+        applyTracking(); return;
+      }
+    } catch (e) { log('Cache indisponível (' + (e.message || e) + '); rastreando do zero.'); }
+  }
+  if (!resetEditsForNewTrack()) return;
   setStatus('Carregando modelos do MediaPipe (1ª vez baixa ~15–30 MB)...');
   const T = await createTrackers($('poseModel').value, $('faceChk').checked);
   track = { fps, N, w: videoEl.videoWidth, h: videoEl.videoHeight,
@@ -1683,6 +1771,8 @@ async function trackVideo() {
   const pc = n => (100 * n / N).toFixed(0) + '%';
   log(`Rastreio concluído: corpo ${pc(okP)} | mão esq. ${pc(okL)} | mão dir. ${pc(okR)}` + (track.hasFace ? ` | rosto ${pc(okF)}` : ''));
   if (okL + okR < N * 0.2) log('⚠ Poucas mãos detectadas. Tente o modelo "Heavy", boa iluminação, mãos sem desfoque e fundo contrastante.');
+  track.key = key;
+  await cacheSaveTrack(key);                               // guarda os dados brutos para a próxima vez (silencioso)
   applyTracking();
 }
 
@@ -1950,6 +2040,7 @@ $('videoInput').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   track = null; anim = null; playing = false; updateBtn();
   try {
+    videoFile = f;
     await loadVideoFile(f);
     await seekTo(videoEl, 0.01);
     pv.height = Math.round(pv.width * videoEl.videoHeight / videoEl.videoWidth);
@@ -2016,10 +2107,11 @@ function rampW(i, e) {                       // ponto fixo: peso 0..1 do interva
   const R = Math.min(EDIT_RAMP, Math.floor((e.b - e.a) / 2));
   return Math.min(1, (i - e.a + 1) / (R + 1), (e.b - i + 1) / (R + 1));
 }
-function outW(i, f0, f1) {                   // keyframes: peso 1 entre a 1ª e a última chave; rampa de EDIT_RAMP frames POR FORA
-  if (i >= f0 && i <= f1) return 1;
-  const d = i < f0 ? f0 - i : i - f1;
-  return d > EDIT_RAMP ? 0 : 1 - d / (EDIT_RAMP + 1);
+function outW(i, f0, f1) {
+  if (i < f0 || i > f1) return 0;
+  const R = Math.min(EDIT_RAMP, Math.floor((f1 - f0) / 2));
+  if (R <= 0) return 1;
+  return Math.min(1, (i - f0 + 1) / (R + 1), (f1 - i + 1) / (R + 1));
 }
 function contactsAt(i) {                     // pontos fixos ativos no frame i (no formato que o retargetFrame entende)
   const out = { left: null, right: null };
@@ -2430,7 +2522,10 @@ $('edKey').addEventListener('click', () => { if (!edMode) return; const tr = rec
 $('edFix').addEventListener('click', () => {
   if (!edMode) return;
   if (sel.a == null || sel.b == null) { setStatus('Defina o intervalo primeiro ("[ início aqui" / "fim aqui ]"); a edição continua aberta.'); return; }
+  const savedId = edMode.trackId;
+  edMode.trackId = null;                        // ◀ FORÇA FAIXA NOVA: cada "Fixar no intervalo" = uma faixa independente
   const tr = recordKeys(sel.a === sel.b ? [sel.a] : [sel.a, sel.b]);
+  if (!tr) edMode.trackId = savedId;            // se algo deu errado, restaura
   if (tr) finishRecord(tr, `Pose fixada nos frames ${sel.a + 1}–${sel.b + 1}`);
 });
 $('edCancel').addEventListener('click', () => { exitEdit(true); setStatus('Edição cancelada.'); });
@@ -2438,6 +2533,7 @@ $('torsoScale').addEventListener('input', e => { $('torsoVal').textContent = (+e
 $('torsoScale').addEventListener('change', () => track && applyTracking(true));
 
 /* ---------- Console ---------- */
+window.limparCacheRastreio = async () => { await cacheClear(); if (track) track.key = null; return 'cache de rastreio apagado'; };   // sem botão: use no console se mudar a lógica do rastreio
 window.showBones   = () => console.log(Object.keys(bones));
 window.showMapping = () => console.log(mapping);
 window.remap = (logical, boneName) => {
