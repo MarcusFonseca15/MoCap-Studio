@@ -1097,7 +1097,16 @@ function planArm(s, S, env) {
     }
   }
   const ae = S.armEdits?.[s];       // ajuste MANUAL do usuário (mover punho/cotovelo no espaço): vale por último, inclusive sobre a colisão
-  if (ae) { if (ae.wrist) T.add(ae.wrist); if (ae.elbow) eoff.add(ae.elbow); sol = solve(); }
+  if (ae && ae.wristAbs && ae.elbowAbs) {
+    T.copy(ae.wristAbs);
+    const sol0 = solve();
+    eoff.copy(ae.elbowAbs).sub(sol0.elbow);
+    sol = solve();
+  } else if (ae) {
+    if (ae.wrist) T.add(ae.wrist);
+    if (ae.elbow) eoff.add(ae.elbow);
+    sol = solve();
+  }
   return { sol, geo: geoOf(sol) };
 }
 function applyArm(s, plan) {
@@ -1219,8 +1228,15 @@ function retargetFrame(S) {
   if (S.edits) {
     for (const e of S.edits) for (const it of e.items) {
       if (!it.bone) continue;
-      const cur = it.bone.quaternion.clone();
-      it.bone.quaternion.slerpQuaternions(cur, it.q, e.w * (it.w ?? 1));
+      if (it.worldQ) {
+        const Qp = it.bone.parent.getWorldQuaternion(new THREE.Quaternion());
+        const localTarget = Qp.invert().multiply(it.worldQ);
+        it.bone.quaternion.slerpQuaternions(it.bone.quaternion, localTarget, e.w * (it.w ?? 1));
+      } else {
+        const cur = it.bone.quaternion.clone();
+        it.bone.quaternion.slerpQuaternions(cur, it.q, e.w * (it.w ?? 1));
+      }
+      it.bone.updateMatrixWorld(true);
     }
     avatar.updateMatrixWorld(true);
   }
@@ -2133,33 +2149,48 @@ function contactsAt(i) {                     // pontos fixos ativos no frame i (
 function evalTrack(tr, i) {
   const out = { items: [], arm: null };
   const per = new Map();
-  for (const k of tr.keys) for (const it of k.items) { if (!per.has(it.name)) per.set(it.name, []); per.get(it.name).push({ f: k.f, q: it.q }); }
+  for (const k of tr.keys) for (const it of k.items) { if (!per.has(it.name)) per.set(it.name, []); per.get(it.name).push({ f: k.f, q: it.q, worldQ: it.worldQ }); }
   const seg = (arr, f0, f1) => { let j = 0; while (j + 1 < arr.length - 1 && arr[j + 1].f <= i) j++; return [arr[j], arr[j + 1], (i - arr[j].f) / (arr[j + 1].f - arr[j].f)]; };
   for (const [name, arr] of per) {
     const f0 = arr[0].f, f1 = arr[arr.length - 1].f, w = outW(i, f0, f1);
     if (w <= 0) continue;
-    let q;
-    if (i <= f0) q = arr[0].q; else if (i >= f1) q = arr[arr.length - 1].q;
-    else { const [A, B, t] = seg(arr); q = A.q.clone().slerp(B.q, t); }
-    out.items.push({ name, q, w });
+    let q, worldQ;
+    if (i <= f0) { q = arr[0].q; worldQ = arr[0].worldQ; }
+    else if (i >= f1) { q = arr[arr.length - 1].q; worldQ = arr[arr.length - 1].worldQ; }
+    else {
+      const [A, B, t] = seg(arr);
+      q = A.q.clone().slerp(B.q, t);
+      if (A.worldQ && B.worldQ) worldQ = A.worldQ.clone().slerp(B.worldQ, t);
+    }
+    out.items.push({ name, q, worldQ, w });
   }
   const ak = tr.keys.filter(k => k.arm);
   if (ak.length) {
     const f0 = ak[0].f, f1 = ak[ak.length - 1].f, w = outW(i, f0, f1);
     if (w > 0) {
-      let wr, el;
-      if (i <= f0) { wr = ak[0].arm.wrist; el = ak[0].arm.elbow; }
-      else if (i >= f1) { wr = ak[ak.length - 1].arm.wrist; el = ak[ak.length - 1].arm.elbow; }
+      let wr, el, wristAbs, elbowAbs;
+      if (i <= f0) {
+        wr = ak[0].arm.wrist; el = ak[0].arm.elbow;
+        wristAbs = ak[0].arm.wristAbs; elbowAbs = ak[0].arm.elbowAbs;
+      } else if (i >= f1) {
+        wr = ak[ak.length - 1].arm.wrist; el = ak[ak.length - 1].arm.elbow;
+        wristAbs = ak[ak.length - 1].arm.wristAbs; elbowAbs = ak[ak.length - 1].arm.elbowAbs;
+      }
       else { let j = 0; while (j + 1 < ak.length - 1 && ak[j + 1].f <= i) j++; const A = ak[j], B = ak[j + 1], t = (i - A.f) / (B.f - A.f);
-             wr = A.arm.wrist.clone().lerp(B.arm.wrist, t); el = A.arm.elbow.clone().lerp(B.arm.elbow, t); }
+             wr = A.arm.wrist.clone().lerp(B.arm.wrist, t); el = A.arm.elbow.clone().lerp(B.arm.elbow, t);
+             if (A.arm.wristAbs && B.arm.wristAbs && A.arm.elbowAbs && B.arm.elbowAbs) {
+               wristAbs = A.arm.wristAbs.clone().lerp(B.arm.wristAbs, t);
+               elbowAbs = A.arm.elbowAbs.clone().lerp(B.arm.elbowAbs, t);
+             } }
       out.arm = { wrist: wr.clone().multiplyScalar(w), elbow: el.clone().multiplyScalar(w) };
+      if (wristAbs && elbowAbs) Object.assign(out.arm, { wristAbs, elbowAbs });
     }
   }
   return out;
 }
 function editsAt(i) {                        // ajustes de ossos ativos no frame i (cada item com o seu peso)
   const items = [];
-  for (const tr of edits.tracks) for (const it of evalTrack(tr, i).items) { const b = bones[it.name]; if (b) items.push({ bone: b, q: it.q, w: it.w }); }
+  for (const tr of edits.tracks) for (const it of evalTrack(tr, i).items) { const b = bones[it.name]; if (b) items.push({ bone: b, q: it.q, worldQ: it.worldQ, w: it.w }); }
   return items.length ? [{ w: 1, items }] : null;
 }
 function armEditsAt(i, excludeId = null) {   // deslocamentos de punho/cotovelo ativos no frame i (soma das faixas de braço)
@@ -2169,6 +2200,7 @@ function armEditsAt(i, excludeId = null) {   // deslocamentos de punho/cotovelo 
     const a = evalTrack(tr, i).arm; if (!a) continue;
     const o = out[tr.side] ||= { wrist: V3(), elbow: V3() };
     o.wrist.add(a.wrist); o.elbow.add(a.elbow);
+    if (a.wristAbs && a.elbowAbs) { o.wristAbs = a.wristAbs; o.elbowAbs = a.elbowAbs; }
   }
   return (out.left || out.right) ? out : null;
 }
@@ -2416,6 +2448,10 @@ function armOverride() {                     // deslocamentos das OUTRAS faixas 
   const ov = armEditsAt(curFrame, edMode.trackId) || { left: null, right: null };
   const s = edMode.side, o = ov[s] || { wrist: V3(), elbow: V3() };
   ov[s] = { wrist: o.wrist.clone().add(edMode.off.wrist), elbow: o.elbow.clone().add(edMode.off.elbow) };
+  if (o.wristAbs && o.elbowAbs) {
+    ov[s].wristAbs = o.wristAbs.clone().add(edMode.off.wrist);
+    ov[s].elbowAbs = o.elbowAbs.clone().add(edMode.off.elbow);
+  }
   return ov;
 }
 function armFromProxies() {
@@ -2516,12 +2552,31 @@ renderer.domElement.addEventListener('pointerup', e => {
 /* ----- gravar keyframes ----- */
 function recordKeys(frames) {
   const kind = edMode.kind, side = edMode.side;
-  const items = [...edMode.dirty].map(b => ({ name: b.name, q: b.quaternion.clone() }));
-  const arm = kind === 'braco' ? { wrist: edMode.off.wrist.clone(), elbow: edMode.off.elbow.clone() } : null;
+  avatar.updateMatrixWorld(true);
+  const items = [...edMode.dirty].map(b => {
+    if (kind === 'pulso') {
+      const worldQ = b.getWorldQuaternion(new THREE.Quaternion());
+      return { name: b.name, worldQ, q: b.quaternion.clone() };
+    }
+    return { name: b.name, q: b.quaternion.clone() };
+  });
+  const arm = kind === 'braco' ? {
+    wristAbs: worldPos(rig[side].hand).clone(),
+    elbowAbs: worldPos(rig[side].fore).clone(),
+    wrist: edMode.off.wrist.clone(),
+    elbow: edMode.off.elbow.clone()
+  } : null;
   if (kind !== 'braco' && !items.length) { setStatus('Nada foi alterado: gire algum osso, use os sliders ou aplique uma CM.'); return false; }
   let tr = edits.tracks.find(x => x.id === edMode.trackId), created = false;
   if (!tr) { tr = { id: edId++, kind, side: kind === 'pose' ? 'left' : side, keys: [] }; edits.tracks.push(tr); created = true; }
-  commitKeys(tr, frames.map(f => ({ f, items: items.map(it => ({ name: it.name, q: it.q.clone() })), arm: arm ? { wrist: arm.wrist.clone(), elbow: arm.elbow.clone() } : null })), created);
+  commitKeys(tr, frames.map(f => ({
+    f,
+    items: items.map(it => ({ name: it.name, q: it.q.clone(), worldQ: it.worldQ?.clone() })),
+    arm: arm ? {
+      wristAbs: arm.wristAbs.clone(), elbowAbs: arm.elbowAbs.clone(),
+      wrist: arm.wrist.clone(), elbow: arm.elbow.clone()
+    } : null
+  })), created);
   lastTrack[trackKey(kind, side)] = tr.id;
   return tr;
 }
