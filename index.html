@@ -2113,10 +2113,11 @@ function rampW(i, e) {                       // ponto fixo: peso 0..1 do interva
   const R = Math.min(EDIT_RAMP, Math.floor((e.b - e.a) / 2));
   return Math.min(1, (i - e.a + 1) / (R + 1), (e.b - i + 1) / (R + 1));
 }
-function outW(i, f0, f1) {                   // keyframes: peso 1 entre a 1ª e a última chave; rampa de EDIT_RAMP frames POR FORA
-  if (i >= f0 && i <= f1) return 1;
-  const d = i < f0 ? f0 - i : i - f1;
-  return d > EDIT_RAMP ? 0 : 1 - d / (EDIT_RAMP + 1);
+function outW(i, f0, f1) {
+  if (i < f0 || i > f1) return 0;
+  const R = Math.min(EDIT_RAMP, Math.floor((f1 - f0) / 2));
+  if (R <= 0) return 1;
+  return Math.min(1, (i - f0 + 1) / (R + 1), (f1 - i + 1) / (R + 1));
 }
 function contactsAt(i) {                     // pontos fixos ativos no frame i (no formato que o retargetFrame entende)
   const out = { left: null, right: null };
@@ -2659,7 +2660,10 @@ $('edKey').addEventListener('click', () => { if (!edMode) return; const tr = rec
 $('edFix').addEventListener('click', () => {
   if (!edMode) return;
   if (sel.a == null || sel.b == null) { setStatus('Defina o intervalo primeiro ("[ início aqui" / "fim aqui ]"); a edição continua aberta.'); return; }
+  const savedId = edMode.trackId;
+  edMode.trackId = null;                        // ◀ FORÇA FAIXA NOVA: cada "Fixar" é uma pose independente
   const tr = recordKeys(sel.a === sel.b ? [sel.a] : [sel.a, sel.b]);
+  if (!tr) edMode.trackId = savedId;            // se algo deu errado, restaura
   if (tr) finishRecord(tr, `Pose fixada nos frames ${sel.a + 1}–${sel.b + 1}`);
 });
 $('edCancel').addEventListener('click', () => { exitEdit(true); setStatus('Edição cancelada.'); });
