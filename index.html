@@ -19,13 +19,29 @@
   button:disabled { background:#444; cursor:not-allowed; }
   button:hover:not(:disabled) { filter:brightness(1.15); }
   button.holding { filter: brightness(1.4) !important; }
-  #preview { position:absolute; left:8px; bottom:8px; width:360px; background:#000c; border:1px solid #444; border-radius:6px; padding:4px; z-index:5; }
+  /* ---- Painéis arrastáveis + minimizáveis ---- */
+  #preview, #logPanel, #editor { position: absolute; }
+  #preview.dragging, #logPanel.dragging, #editor.dragging,
+  #preview.dragging .panelHd, #logPanel.dragging .panelHd,
+  #editor.dragging > .row:first-child { cursor: grabbing; user-select: none; }
+  .panelHd {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    padding: 2px 6px; margin: -4px -4px 4px -4px;
+    background: #0d0d0d; border-bottom: 1px solid #333; border-radius: 5px 5px 0 0;
+    font-size: 11px; color: #9cf; cursor: grab; user-select: none;
+  }
+  .panelHd button { padding: 0 6px; font-size: 12px; line-height: 1; background: #357; border-radius: 3px; }
+  #preview { left: 8px; bottom: 8px; width: 360px; background: #000c; border: 1px solid #444; border-radius: 6px; padding: 4px; z-index: 5; }
+  #preview.minimized > :not(.panelHd) { display: none; }
+  #logPanel { bottom: 8px; right: 8px; width: 360px; max-height: 220px; background: #000b; border-radius: 6px; z-index: 5; overflow: hidden; display: flex; flex-direction: column; }
+  #logPanel .panelHd { margin: 0; border-radius: 5px 5px 0 0; }
+  #logPanel.minimized #log { display: none; }
+  #log { flex: 1; min-height: 0; overflow: auto; padding: 6px; color: #0f0; font-family: monospace; font-size: 11px; white-space: pre-wrap; }
   #pv { width:100%; display:block; background:#000; border-radius:4px; }
   #pvInfo { font-size:11px; color:#aaa; padding:2px 4px; }
   #timeline { position:absolute; left:380px; right:380px; bottom:12px; z-index:5; display:none; }
   #timeline input { width:100%; }
-  #log { position:absolute; bottom:8px; right:8px; width:360px; max-height:200px; overflow:auto; background:#000b;
-         color:#0f0; font-family:monospace; font-size:11px; padding:6px; z-index:5; white-space:pre-wrap; border-radius:6px; }
+  #editor > .row:first-child { cursor: grab; user-select: none; }
   canvas { display:block; }
   #editor { position:absolute; top:8px; right:8px; width:292px; max-height:calc(100% - 236px); overflow:auto; background:#000d;
             border:1px solid #444; border-radius:6px; padding:6px 8px; font-size:12px; z-index:6; }
@@ -89,7 +105,14 @@
 </div>
 <div id="stage">
   <div id="view"></div>
-  <div id="preview"><canvas id="pv" width="360" height="203"></canvas><div id="pvInfo">Pré-visualização do rastreio</div></div>
+  <div id="preview">
+    <div class="panelHd">
+      <span>🎥 Pré-visualização</span>
+      <button class="minBtn" title="Minimizar">–</button>
+    </div>
+    <canvas id="pv" width="360" height="203"></canvas>
+    <div id="pvInfo">Pré-visualização do rastreio</div>
+  </div>
   <div id="timeline"><canvas id="strip" title="laranja/rosa: mão esq./dir. detectada (escuro = perdida) · vermelho: penetração residual · azul: intervalo · verde: pontos fixos · amarelo: ajustes"></canvas>
     <input type="range" id="timeRange" min="0" max="0" value="0" step="1"/></div>
   <div id="editor">
@@ -142,7 +165,13 @@
       <h4>Histórico de edições <span style="font-weight:normal;color:#777">(mais recente no topo)</span></h4><div id="edList"><span style="color:#777">nenhuma</span></div>
     </div>
   </div>
-  <div id="log"></div>
+  <div id="logPanel">
+    <div class="panelHd">
+      <span>📋 Log</span>
+      <button class="minBtn" title="Minimizar">–</button>
+    </div>
+    <div id="log"></div>
+  </div>
 </div>
 <video id="video" playsinline muted preload="auto"></video>
 
@@ -2793,6 +2822,48 @@ window.diagnoseAvatar = () => {
   if (!avatar) return console.log('Nenhum avatar carregado.');
   console.log({ mapping, animados: driven.map(b => b.name), tronco: rig.torso.map(b => b.name) });
 };
+
+/* ---------- Painéis arrastáveis e minimizáveis ---------- */
+function makeDraggable(panel, handle) {
+  if (!panel || !handle) return;
+  let dragging = false, sx = 0, sy = 0, sl = 0, st = 0;
+  handle.addEventListener('pointerdown', e => {
+    if (e.target.closest('button')) return;                 // deixa o botão (minimizar/toggle) agir
+    const r = panel.getBoundingClientRect(), pr = panel.offsetParent.getBoundingClientRect();
+    sx = e.clientX; sy = e.clientY;
+    sl = r.left - pr.left; st = r.top - pr.top;
+    panel.style.left = sl + 'px'; panel.style.top = st + 'px';
+    panel.style.right = 'auto'; panel.style.bottom = 'auto';
+    panel.classList.add('dragging');
+    try { handle.setPointerCapture(e.pointerId); } catch {}
+    e.preventDefault();
+    dragging = true;
+  });
+  handle.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const pr = panel.offsetParent.getBoundingClientRect();
+    const nl = Math.max(0, Math.min(pr.width - 60, sl + e.clientX - sx));
+    const nt = Math.max(0, Math.min(pr.height - 40, st + e.clientY - sy));
+    panel.style.left = nl + 'px'; panel.style.top = nt + 'px';
+  });
+  const stop = () => { dragging = false; panel.classList.remove('dragging'); };
+  handle.addEventListener('pointerup', stop);
+  handle.addEventListener('pointercancel', stop);
+  handle.addEventListener('lostpointercapture', stop);
+}
+/* Botão de minimizar dos painéis novos (preview e log). O editor mantém o #edToggle próprio. */
+document.querySelectorAll('.panelHd .minBtn').forEach(btn => {
+  btn.addEventListener('click', e => {
+    e.stopPropagation();
+    const panel = btn.closest('#preview, #logPanel'); if (!panel) return;
+    panel.classList.toggle('minimized');
+    btn.textContent = panel.classList.contains('minimized') ? '+' : '–';
+  });
+});
+/* Alças: preview e log usam .panelHd; o editor usa a sua primeira .row (título já existente). */
+makeDraggable($('preview'),  $('preview').querySelector('.panelHd'));
+makeDraggable($('logPanel'), $('logPanel').querySelector('.panelHd'));
+makeDraggable($('editor'),   $('editor').querySelector('.row'));
 
 /* ---------- Loop de render ---------- */
 (function animate() {
