@@ -105,14 +105,31 @@
         </select></div>
       <div class="row"><button id="pinAdd">Criar ponto fixo</button></div>
       <hr>
-      <h4>🖐 Ajustar (pausa e edita o esqueleto)</h4>
-      <div class="row"><button id="cmL" class="sec">Ajustar CM esq.</button><button id="cmR" class="sec">Ajustar CM dir.</button><button id="poseEd" class="sec">Ajustar pose</button></div>
+      <h4>🖐 CMs registradas (cmkeeper.json)</h4>
+      <div class="row"><button id="cmLoad" class="sec">📂 Carregar cmkeeper.json</button><input type="file" id="cmFile" accept=".json,application/json" style="display:none"/></div>
+      <div id="cmInfo" style="color:#9a9;font-size:11px">nenhuma CM carregada</div>
+      <hr>
+      <h4>🎞 Ajustar com keyframes (pausa o frame e edita o esqueleto)</h4>
+      <div class="row"><button id="cmL" class="sec">CM esq.</button><button id="cmR" class="sec">CM dir.</button><button id="wrL" class="sec">Pulso esq.</button><button id="wrR" class="sec">Pulso dir.</button></div>
+      <div class="row"><button id="arL" class="sec">Braço esq.</button><button id="arR" class="sec">Braço dir.</button><button id="poseEd" class="sec">Pose (ossos)</button></div>
       <div id="edMode" style="display:none">
         <div class="row"><b id="edModeTitle"></b></div>
-        <div class="row">osso: <select id="edBone"></select></div>
-        <div class="row" id="edPresetRow">CM pronta: <select id="edPreset"></select><button id="edPresetBtn" class="sec">aplicar</button></div>
-        <div class="row"><button id="edFix">Fixar no intervalo</button><button id="edCancel" class="sec">Cancelar</button></div>
-        <div class="row" style="color:#999">Clique numa bolinha amarela (ou escolha o osso) e gire com o gizmo.</div>
+        <div class="row">faixa: <select id="edTrack"></select></div>
+        <div class="row" id="edBoneRow">osso: <select id="edBone"></select></div>
+        <div id="edCmRow">
+          <div class="row">CM: <select id="edPreset"></select><button id="edPresetBtn" class="sec">aplicar</button></div>
+          <div class="row"><img id="cmThumb" alt="" style="display:none;width:72px;height:72px;object-fit:cover;border-radius:4px"/><label><input type="checkbox" id="cmInvert"/> inverter (se a CM vier espelhada)</label></div>
+          <div id="cmDesc" style="color:#9a9;font-size:11px"></div>
+        </div>
+        <div id="edWristRow">
+          <div class="row">giro da palma <input type="range" id="wrTw" min="-120" max="120" value="0" step="1" style="width:120px"/> <span id="wrTwV">0°</span></div>
+          <div class="row">flexão/extensão <input type="range" id="wrFl" min="-71" max="73" value="0" step="1" style="width:110px"/> <span id="wrFlV">0°</span></div>
+          <div class="row">desvio rad./ulnar <input type="range" id="wrDv" min="-19" max="33" value="0" step="1" style="width:110px"/> <span id="wrDvV">0°</span></div>
+        </div>
+        <div id="edArmRow"><div class="row">mover: <select id="edArmPt"><option value="wrist">punho</option><option value="elbow">cotovelo</option></select><button id="edArmZero" class="sec">zerar</button></div></div>
+        <div class="row"><button id="edKey">◆ Gravar keyframe neste frame</button></div>
+        <div class="row"><button id="edFix" class="sec">Fixar no intervalo [início–fim]</button><button id="edCancel" class="sec">Cancelar</button></div>
+        <div class="row" style="color:#999" id="edHint"></div>
       </div>
       <hr>
       <h4>Edições</h4><div id="edList"><span style="color:#777">nenhuma</span></div>
@@ -542,6 +559,84 @@ function presetQuats(side, name) {
   return out;
 }
 
+/* =====================================================================
+ *  CMs IMPORTADAS (cmkeeper.json): 21 landmarks por CM, origem no punho, escala da palma, mediana dos frames.
+ *  Só as DIREÇÕES importam. O quadro da mão é montado a partir dos próprios pontos (x = dedos, y = índice→mindinho,
+ *  z = x×y), então o resultado não depende do sistema de coordenadas do arquivo. A lateralidade da mão é conferida
+ *  pela direção em que os dedos DOBRAM (para a palma); mão esquerda do avatar = espelhar (inverter o eixo z local).
+ * ===================================================================== */
+const customCMs = [];     // { id, nome, L: Vector3[21], side: 'left'|'right', thumb, qual }
+function parseCMKeeper(data) {
+  const arr = Array.isArray(data) ? data : data?.cms;
+  const out = { cms: [], skipped: 0, total: Array.isArray(arr) ? arr.length : 0 };
+  if (!Array.isArray(arr)) return out;
+  for (const it of arr) {
+    const lm = it?.landmarks;
+    const ok = Array.isArray(lm) && lm.length >= 21 && lm.slice(0, 21).every(q => q && [q.x, q.y, q.z].every(Number.isFinite));
+    if (!ok) { out.skipped++; continue; }
+    const L = lm.slice(0, 21).map(q => V3(q.x, q.y, q.z));
+    if (L[9].distanceTo(L[0]) < 1e-6 || L[17].distanceTo(L[5]) < 1e-6) { out.skipped++; continue; }   // mão degenerada
+    out.cms.push({ id: it.id ?? `cm${out.cms.length}`, nome: String(it.nome ?? it.name ?? it.id ?? `CM ${out.cms.length + 1}`), L,
+                   side: String(it.handedness ?? 'Right').toLowerCase() === 'left' ? 'left' : 'right',
+                   thumb: typeof it.thumbnail === 'string' ? it.thumbnail : null, qual: it.qualidade ?? null });
+  }
+  return out;
+}
+function handLocalCoords(L) {                    // coordenadas no quadro da própria mão
+  const F = handBasis(L[9].clone().sub(L[0]), L[17].clone().sub(L[5])), Fi = F.invert();
+  return L.map(q => q.clone().sub(L[0]).applyQuaternion(Fi));
+}
+const angDeg = (a, b) => Math.acos(Math.min(1, Math.max(-1, a.clone().normalize().dot(b.clone().normalize())))) / DEG;
+const LONG_F = [[5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20]];
+/* Flexão de cada junta (graus) e direção para onde os dedos dobram (para detectar mão espelhada) */
+function landmarkFlexions(L) {
+  const c = handLocalCoords(L), v = (a, b) => c[b].clone().sub(c[a]);
+  const fingers = { thumb: [angDeg(v(0, 1), v(1, 2)), angDeg(v(1, 2), v(2, 3)), angDeg(v(2, 3), v(3, 4))] };
+  ['index', 'middle', 'ring', 'pinky'].forEach((n, i) => { const [m, p, d, t] = LONG_F[i]; fingers[n] = [angDeg(v(0, m), v(m, p)), angDeg(v(m, p), v(p, d)), angDeg(v(p, d), v(d, t))]; });
+  let bend = 0, pz = 0;
+  for (const [m, p, d, t] of LONG_F) { bend += (angDeg(v(m, p), v(p, d)) + angDeg(v(p, d), v(d, t))) / 2; pz += v(m, t).z / (v(m, t).length() + 1e-9); }
+  return { fingers, meanBend: bend / 4, palmarZ: pz / 4, decisive: bend / 4 > 35 };
+}
+/* Converte uma CM (landmarks) em quaternions LOCAIS dos dedos do avatar. dataSide = mão em que o arquivo foi gravado. */
+function cmFromLandmarks(side, L, { invert = false, dataSide = 'right' } = {}) {
+  const out = new Map(), R = rig?.[side], Fr = restFrames[side];
+  if (!R || !R.hand || !Fr || L.length < 21) return out;
+  const c = handLocalCoords(L);
+  if (c.some(q => !Number.isFinite(q.x + q.y + q.z))) return out;
+  const fx = landmarkFlexions(L);
+  // mão gravada com a lateralidade trocada? (os dedos dobram para a palma: palma = +z na direita, −z na esquerda)
+  const autoFix = fx.decisive && fx.palmarZ * (dataSide === 'right' ? 1 : -1) < 0;
+  const flipZ = autoFix !== invert !== (dataSide !== side);
+  const Delta = worldQuat(R.hand).multiply(rest.get(R.hand).wq.clone().invert());
+  const Hw = c.map(q => V3(q.x, q.y, flipZ ? -q.z : q.z).applyQuaternion(Fr).applyQuaternion(Delta));
+  const chains = Object.values(R.fingers).flat().filter(Boolean), saved = new Map(chains.map(b => [b, b.quaternion.clone()]));
+  for (const [fname, segs] of Object.entries(FINGER_LM)) segs.forEach(([a, b], i) => {
+    const bone = R.fingers[fname][i]; if (!bone) return;
+    const J = jointInfo.get(bone), cone = J?.lim.cone !== undefined ? J.lim.cone * DEG : null;
+    aim(bone, Hw[b].clone().sub(Hw[a]), { max: cone ?? Math.PI, joint: J });             // mesmos limites anatômicos do rastreio
+  });
+  for (const b of chains) out.set(b, b.quaternion.clone());
+  for (const [b, q] of saved) b.quaternion.copy(q);
+  R.hand.updateMatrixWorld(true);
+  out.info = { autoFix, flipZ, ...fx };
+  return out;
+}
+function presetQuatsAny(side, key, opts = {}) {
+  if (String(key).startsWith('cm:')) { const cm = customCMs[+String(key).slice(3)]; return cm ? cmFromLandmarks(side, cm.L, { ...opts, dataSide: cm.side }) : new Map(); }
+  return presetQuats(side, key);
+}
+/* Ajuste do PULSO por ângulos anatômicos, no espaço do antebraço (sobre a rotação base do osso da mão).
+ * twist = giro da palma em torno do antebraço; flex = flexão(+)/extensão(−); dev = desvio ulnar(+)/radial(−). Graus. */
+function wristAdjust(side, baseQ, twist, flex, dev) {
+  const R = rig[side], J = wristAxes[side];
+  if (!R?.hand || !R.fore || !J) return baseQ.clone();
+  const af = R.hand.position.clone().normalize(), Qi = rest.get(R.fore).wq.clone().invert();
+  const aL = J.flex.clone().applyQuaternion(Qi); aL.addScaledVector(af, -aL.dot(af)).normalize();
+  const zL = J.dev.clone().applyQuaternion(Qi); zL.addScaledVector(af, -zL.dot(af)); zL.addScaledVector(aL, -zL.dot(aL)); zL.normalize();
+  const q = (ax, d) => new THREE.Quaternion().setFromAxisAngle(ax, d * DEG);
+  return q(af, twist).multiply(q(aL, flex)).multiply(q(zL, dev)).multiply(baseQ);
+}
+
 /* Limita o punho (mão relativa ao antebraço). Separa a torção (pronação/supinação, livre) do restante
  * (flexão/extensão + desvio radial/ulnar) e limita só o restante. */
 function clampWrist(s) {
@@ -949,6 +1044,12 @@ function planArm(s, S, env) {
 
   // pior penetração entre este braço e (tórax, cabeça, outro braço)
   const worst = geo => {
+    let cwEff = cw;
+    for (const sd of ['left', 'right']) {
+    const aw = anchorWorld('shoulder' + (sd === 'left' ? 'L' : 'R'));
+    if (aw && geo.wr.distanceTo(aw) < 0.15 * shoulderDist()) { cwEff = Math.max(cwEff, 0.7); break; }
+    }
+
     let best = null;
     const consider = (r, wW, wE, scale) => {
       if (!r || !r.d || r.pen * scale <= 1e-6) return;
@@ -956,13 +1057,13 @@ function planArm(s, S, env) {
     };
     const u0 = geo.sh.clone().lerp(geo.el, 0.25);              // ignora a raiz do ombro (junta legítima junto ao tórax)
     for (const sg of COL.torso) {
-      consider(capVsSpace(geo.el, geo.wr, geo.rF, sg), 1, 1, 1 - cw);     // braço levantado até o rosto não "colide" com o tórax
-      consider(capVsSpace(u0, geo.el, geo.rU, sg), 0.5, 1.5, 1 - cw);
-      consider(capVsSpace(geo.wr, geo.tip, geo.rH, sg), 1, 0.5, 1 - cw);
+      consider(capVsSpace(geo.el, geo.wr, geo.rF, sg), 1, 1, 1 - cwEff);     // braço levantado até o rosto não "colide" com o tórax
+      consider(capVsSpace(u0, geo.el, geo.rU, sg), 0.5, 1.5, 1 - cwEff);
+      consider(capVsSpace(geo.wr, geo.tip, geo.rH, sg), 1, 0.5, 1 - cwEff);
     }
     if (COL.head) {                                            // no contato com o rosto a cabeça deixa de "repelir" a mão
-      consider(capVsSpace(geo.el, geo.wr, geo.rF, COL.head), 1, 1, 1 - cw);
-      consider(capVsSpace(geo.wr, geo.tip, geo.rH, COL.head), 1, 0.5, 1 - cw);
+      consider(capVsSpace(geo.el, geo.wr, geo.rF, COL.head), 1, 1, 1 - cwEff);
+      consider(capVsSpace(geo.wr, geo.tip, geo.rH, COL.head), 1, 0.5, 1 - cwEff);
     }
     const o = env?.other;
     if (o) {
@@ -995,6 +1096,8 @@ function planArm(s, S, env) {
       sol = solve();
     }
   }
+  const ae = S.armEdits?.[s];       // ajuste MANUAL do usuário (mover punho/cotovelo no espaço): vale por último, inclusive sobre a colisão
+  if (ae) { if (ae.wrist) T.add(ae.wrist); if (ae.elbow) eoff.add(ae.elbow); sol = solve(); }
   return { sol, geo: geoOf(sol) };
 }
 function applyArm(s, plan) {
@@ -1117,7 +1220,7 @@ function retargetFrame(S) {
     for (const e of S.edits) for (const it of e.items) {
       if (!it.bone) continue;
       const cur = it.bone.quaternion.clone();
-      it.bone.quaternion.slerpQuaternions(cur, it.q, e.w);
+      it.bone.quaternion.slerpQuaternions(cur, it.q, e.w * (it.w ?? 1));
     }
     avatar.updateMatrixWorld(true);
   }
@@ -1182,6 +1285,14 @@ class HandHold {
     this.isFrozen = false; this.framesLost = 0; this.lastValidQuats = null; this.lastTwist = null;
     this.lastWristPos = null; this.shownWrist = null; this.wristVelocity = V3(); this.blendCount = 0;
     this.hist = []; this.ext = null; this.extVel = null; this.shown = null; this.shownTwist = null;
+  }
+  clone() {
+    const c = new HandHold(this.side, 1 / this.dt), cq = a => (a ? a.map(q => q && q.clone()) : a), cv = v => (v ? v.clone() : v);
+    Object.assign(c, { isFrozen: this.isFrozen, framesLost: this.framesLost, blendCount: this.blendCount, maxFrames: this.maxFrames,
+      lastValidQuats: cq(this.lastValidQuats), lastTwist: cv(this.lastTwist), lastWristPos: cv(this.lastWristPos), shownWrist: cv(this.shownWrist),
+      wristVelocity: cv(this.wristVelocity), hist: this.hist.map(v => v.clone()), ext: cv(this.ext), extVel: cv(this.extVel),
+      shown: cq(this.shown), shownTwist: cv(this.shownTwist), stats: { ...this.stats } });
+    return c;
   }
   /* Chamar a cada frame ANTES do retargeting. hd = {H,c}|null (confiança já suavizada); Wr = punho da pose (Vector3). */
   begin(hd, Wr, wristVis = 1) {
@@ -1248,7 +1359,7 @@ class HandHold {
 
 /* retargetFrame com persistência. S0 = dados do frame (mãos já suavizadas); holds = { left, right } de HandHold */
 function retargetHeld(S0, holds) {
-  if (!holds) return retargetFrame(S0);
+  if (!holds) return retargetFrame({ ...S0, P: S0.P.map(v => v.clone()) });
   const S = { ...S0, P: S0.P.map(v => v.clone()), hold: {}, zFix: { ...(S0.zFix || {}) } };
   const plans = {};
   for (const s of ['left', 'right']) {
@@ -1363,6 +1474,7 @@ renderer.domElement.addEventListener('pointerup', e => {
 
 /* ---------- Estado da aplicação ---------- */
 let curFrame = 0;        // frame de análise exibido
+let frameInputs = [], holdSnaps = [];   // entradas de cada frame + estado de persistência (preview exato no editor)
 let track = null;        // dados brutos do MediaPipe
 let anim = null;         // { fps, N, snaps:[Float32Array] }
 let playing = false, playT = 0, lastTick = performance.now();
@@ -1380,8 +1492,8 @@ function loadAvatar(buf) {
       try {
         if (avatar) scene.remove(avatar);
         clearMarkers(); calib = null; exitEdit(true);
-        if (edits.pins.length + edits.poses.length) log('Avatar novo: pontos fixos e ajustes anteriores foram limpos.');
-        edits.pins.length = 0; edits.poses.length = 0;
+        if (edits.pins.length + edits.tracks.length) log('Avatar novo: pontos fixos e ajustes anteriores foram limpos.');
+        edits.pins.length = 0; edits.tracks.length = 0;
         const root = gltf.scene;
         root.traverse(o => { if (o.isMesh) o.frustumCulled = false; });
         scene.add(root);
@@ -1517,13 +1629,101 @@ function detectHand(hand, v, wrist, elbow, upperLen) {
   return null;
 }
 
+/* =====================================================================
+ *  CACHE DO RASTREIO (IndexedDB)
+ *  Chave = impressão do vídeo (tamanho + duração + dimensões + hash de 3 trechos do conteúdo) + FPS + modelo de pose + rosto.
+ *  Renomear/copiar o arquivo não muda a chave; um vídeo diferente ou outros parâmetros de análise, sim.
+ *  Guarda só os dados BRUTOS do MediaPipe; suavização, limites, colisão e edições são recalculados em segundos.
+ * ===================================================================== */
+const TRACK_SCHEMA = 2, DB_NAME = 'mocap-studio', DB_STORE = 'tracks', CACHE_MAX = 12;
+let videoFile = null;
+function idbOpen() {
+  return new Promise((res, rej) => {
+    if (typeof indexedDB === 'undefined') return rej(new Error('IndexedDB indisponível neste navegador/contexto'));
+    const r = indexedDB.open(DB_NAME, 1);
+    r.onupgradeneeded = () => { const st = r.result.createObjectStore(DB_STORE, { keyPath: 'key' }); st.createIndex('savedAt', 'savedAt'); };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+    r.onblocked = () => rej(new Error('banco bloqueado por outra aba'));
+  });
+}
+const idbReq = rq => new Promise((res, rej) => { rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error); });
+const idbDone = tx => new Promise((res, rej) => { tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error || new Error('transação abortada')); });
+async function cacheGet(key) {
+  const db = await idbOpen();
+  try { return await idbReq(db.transaction(DB_STORE).objectStore(DB_STORE).get(key)); } finally { db.close(); }
+}
+async function cachePut(rec) {
+  const db = await idbOpen();
+  try {
+    const tx = db.transaction(DB_STORE, 'readwrite'), st = tx.objectStore(DB_STORE);
+    st.put(rec);
+    const n = await idbReq(st.count());
+    if (n > CACHE_MAX) {                                   // mantém só os mais recentes
+      let extra = n - CACHE_MAX;
+      await new Promise((res, rej) => {
+        const cur = st.index('savedAt').openKeyCursor();
+        cur.onsuccess = () => { const c = cur.result; if (c && extra > 0) { st.delete(c.primaryKey); extra--; c.continue(); } else res(); };
+        cur.onerror = () => rej(cur.error);
+      });
+    }
+    await idbDone(tx);
+  } finally { db.close(); }
+}
+async function cacheClear() {
+  const db = await idbOpen();
+  try { const tx = db.transaction(DB_STORE, 'readwrite'); tx.objectStore(DB_STORE).clear(); await idbDone(tx); } finally { db.close(); }
+}
+function fnv1a(u8, seed) { let h = seed >>> 0; for (let i = 0; i < u8.length; i++) { h ^= u8[i]; h = Math.imul(h, 16777619) >>> 0; } return h >>> 0; }
+async function videoFingerprint(file) {                    // hash de início, meio e fim (≈768 KB): rápido mesmo em vídeos grandes
+  const CH = 256 * 1024, size = file.size, mid = size >> 1;
+  const parts = [file.slice(0, CH), file.slice(Math.max(0, mid - CH / 2), mid + CH / 2), file.slice(Math.max(0, size - CH))];
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (const p of parts) { const u8 = new Uint8Array(await p.arrayBuffer()); h1 = fnv1a(u8, h1); h2 = fnv1a(u8, (h2 ^ 0x9e3779b9) >>> 0); }
+  return h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0');
+}
+const cacheKey = (fp, fps) => `v${TRACK_SCHEMA}|${videoFile?.size ?? 0}|${fp}|${videoEl.duration.toFixed(3)}|${videoEl.videoWidth}x${videoEl.videoHeight}|fps${fps}|${$('poseModel').value}|face${+$('faceChk').checked}`;
+function trackFromCache(r, fps, N) {                       // valida antes de confiar: formato, tamanho e comprimento dos vetores
+  if (!r || r.schema !== TRACK_SCHEMA || r.N !== N || r.fps !== fps) return null;
+  for (const k of ['pose', 'handL', 'handR', 'draw', 'depth']) if (!Array.isArray(r[k]) || r[k].length !== N) return null;
+  if (r.pose.some(a => a && a.length !== 132) || r.handL.some(a => a && a.length !== 63) || r.handR.some(a => a && a.length !== 63)) return null;
+  return { fps, N, w: r.w, h: r.h, pose: r.pose, handL: r.handL, handR: r.handR, draw: r.draw, depth: r.depth, hasFace: !!r.hasFace, key: r.key };
+}
+async function cacheSaveTrack(key) {                      // só dados BRUTOS do MediaPipe; falhas viram uma linha no log, nunca interrompem
+  if (!key || !track) return false;
+  try {
+    await cachePut({ key, schema: TRACK_SCHEMA, savedAt: Date.now(), videoName: videoFile?.name ?? '', size: videoFile?.size ?? 0, fps: track.fps, N: track.N, w: track.w, h: track.h,
+                     hasFace: track.hasFace, pose: track.pose, handL: track.handL, handR: track.handR, draw: track.draw, depth: track.depth });
+    return true;
+  } catch (e) { log('⚠ Cache: não consegui salvar (' + (e.name === 'QuotaExceededError' ? 'sem espaço no navegador' : (e.message || e)) + ').'); return false; }
+}
+function resetEditsForNewTrack() {
+  if ((edits.pins.length + edits.tracks.length) && !confirm('Trocar o rastreio apaga os pontos fixos e ajustes criados. Continuar?')) return false;
+  edits.pins.length = 0; edits.tracks.length = 0; sel.a = sel.b = null; exitEdit(true);
+  playing = false; $('playBtn').textContent = '▶ Reproduzir';
+  return true;
+}
+
 async function trackVideo() {
   if (!videoEl.src || !avatar) { setStatus('Carregue vídeo e avatar.'); return; }
   await prepareVideo();
-  if ((edits.pins.length + edits.poses.length) && !confirm('Rastrear de novo apaga os pontos fixos e ajustes criados. Continuar?')) return;
-  edits.pins.length = 0; edits.poses.length = 0; sel.a = sel.b = null; exitEdit(true);
-  playing = false; $('playBtn').textContent = '▶ Reproduzir';
   const fps = +$('fpsSel').value, dur = videoEl.duration, N = Math.floor(dur * fps);
+  let key = null;
+  if (videoFile) { try { key = cacheKey(await videoFingerprint(videoFile), fps); } catch (e) { log('Cache: não consegui identificar o vídeo (' + (e.message || e) + '); rastreando do zero.'); } }
+  if (key && track && track.key === key) { applyTracking(); return; }      // já rastreado nesta sessão: reaplica e MANTÉM as edições
+  if (key) {
+    try {
+      setStatus('Procurando este vídeo no cache...');
+      const rec = trackFromCache(await cacheGet(key), fps, N);
+      if (rec) {
+        if (!resetEditsForNewTrack()) return;
+        track = rec;
+        log(`💾 Rastreio recuperado do cache (${N} frames).`);
+        applyTracking(); return;
+      }
+    } catch (e) { log('Cache indisponível (' + (e.message || e) + '); rastreando do zero.'); }
+  }
+  if (!resetEditsForNewTrack()) return;
   setStatus('Carregando modelos do MediaPipe (1ª vez baixa ~15–30 MB)...');
   const T = await createTrackers($('poseModel').value, $('faceChk').checked);
   track = { fps, N, w: videoEl.videoWidth, h: videoEl.videoHeight,
@@ -1577,6 +1777,8 @@ async function trackVideo() {
   const pc = n => (100 * n / N).toFixed(0) + '%';
   log(`Rastreio concluído: corpo ${pc(okP)} | mão esq. ${pc(okL)} | mão dir. ${pc(okR)}` + (track.hasFace ? ` | rosto ${pc(okF)}` : ''));
   if (okL + okR < N * 0.2) log('⚠ Poucas mãos detectadas. Tente o modelo "Heavy", boa iluminação, mãos sem desfoque e fundo contrastante.');
+  track.key = key;
+  await cacheSaveTrack(key);                               // guarda os dados brutos para a próxima vez (silencioso)
   applyTracking();
 }
 
@@ -1668,6 +1870,7 @@ function applyTracking(keep = false) {
   if (!track || !avatar) return;
   COLL.torsoScale = +$('torsoScale').value;
   track.pen = new Uint8Array(track.N);
+  frameInputs = new Array(track.N).fill(null); holdSnaps = new Array(track.N).fill(null);
   let penFrames = 0, worstPen = { pen: 0, i: 0, what: '' };
   const fps = track.fps, sigma = (+$('smooth').value / 1000) * fps;
   const { poseS, LS, RS } = buildSamples($('mirror').checked);
@@ -1706,7 +1909,10 @@ function applyTracking(keep = false) {
       const P = [], vis = [];
       for (let k = 0; k < 33; k++) { P.push(V3(p.data[k*4], p.data[k*4+1], p.data[k*4+2])); vis.push(p.data[k*4+3]); }
       const ctc = contactsAt(i);                                  // pontos fixos CRIADOS PELO USUÁRIO (nada automático)
-      retargetHeld({ P, vis, left: mkHand(sl[i]), right: mkHand(sr[i]), prop, contact: ctc, edits: editsAt(i), zFix: zfix[i], opts: { zBias: $('biasChk').checked, collide: $('collChk').checked, limits: $('limChk').checked } }, holds);
+      const S0 = { P, vis, left: mkHand(sl[i]), right: mkHand(sr[i]), prop, contact: ctc, edits: editsAt(i), armEdits: armEditsAt(i), zFix: zfix[i],
+                   opts: { zBias: $('biasChk').checked, collide: $('collChk').checked, limits: $('limChk').checked } };
+      frameInputs[i] = S0; holdSnaps[i] = holds ? { left: holds.left.clone(), right: holds.right.clone() } : null;   // para o preview exato do editor
+      retargetHeld(S0, holds);
       if ($('collChk').checked) {                                 // diagnóstico: quanto de penetração SOBROU na pose final
         const rp = residualPenetration(), pinned = (ctc.left && ctc.left.w > 0) || (ctc.right && ctc.right.w > 0);
         if (!pinned && rp.pen > 0.005) { penFrames++; track.pen[i] = 1; if (rp.pen > worstPen.pen) worstPen = { pen: rp.pen, i, what: rp.what }; }
@@ -1783,7 +1989,7 @@ function drawPreview(i, fromPlayback = false) {
   pv.height = Math.round(pv.width * (track.h / track.w));
   if (!fromPlayback) { paintPreview(i); return; }
   const t = i / track.fps;                          // durante a reprodução, acompanha o vídeo
-  if (pvSeekBusy || Math.abs(videoEl.currentTime - t) < 0.5 / track.fps) { paintPreview(i); return; }
+  if (pvSeekBusy || !Number.isFinite(videoEl.duration) || Math.abs(videoEl.currentTime - t) < 0.5 / track.fps) { paintPreview(i); return; }   // vídeo sem duração válida: não tenta buscar
   pvSeekBusy = true;
   videoEl.addEventListener('seeked', () => { pvSeekBusy = false; paintPreview(i); }, { once: true });
   videoEl.currentTime = Math.min(t, videoEl.duration - 0.001);
@@ -1840,6 +2046,7 @@ $('videoInput').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   track = null; anim = null; playing = false; updateBtn();
   try {
+    videoFile = f;
     await loadVideoFile(f);
     await seekTo(videoEl, 0.01);
     pv.height = Math.round(pv.width * videoEl.videoHeight / videoEl.videoWidth);
@@ -1875,7 +2082,7 @@ $('mirror').addEventListener('change', () => track && applyTracking());
 $('smooth').addEventListener('input', e => { $('smoothVal').textContent = e.target.value + ' ms'; });
 $('smooth').addEventListener('change', () => track && applyTracking());
 $('resetBtn').addEventListener('click', () => {
-  exitEdit(true); edits.pins.length = 0; edits.poses.length = 0; sel.a = sel.b = null; refreshEdits();
+  exitEdit(true); edits.pins.length = 0; edits.tracks.length = 0; sel.a = sel.b = null; refreshEdits();
   playing = false; anim = null; track = null;
   if (avatar) resetPose();
   $('timeline').style.display = 'none'; $('exportBtn').disabled = true; $('playBtn').disabled = true;
@@ -1883,26 +2090,34 @@ $('resetBtn').addEventListener('click', () => {
 });
 
 /* =====================================================================
- *  EDITOR DE ANIMAÇÃO (depois do rastreio): pontos fixos e ajustes de pose/CM por intervalo de tempo
- *   • Ponto fixo: durante [início, fim], uma parte da mão (polegar, indicador... punho) é presa a um ponto
- *     (rosto, corpo ou parte da outra mão). Entra/sai com rampa de 4 frames. NADA é automático.
- *   • Ajustar CM / pose: pausa, gira ossos com um gizmo (ou aplica uma CM pronta) e FIXA o resultado no intervalo.
- *     CM = Configuração de Mão (só os dedos): a orientação da palma continua vindo do rastreio.
+ *  EDITOR DE ANIMAÇÃO (depois do rastreio)
+ *   • Ponto fixo: durante [início, fim], uma parte da mão é presa a um ponto (rosto, corpo ou outra mão). Rampa de 4 frames.
+ *   • FAIXAS DE KEYFRAMES (CM, pulso, braço, pose): em cada frame você grava uma pose; entre dois keyframes o esqueleto se
+ *     INTERPOLA sozinho (slerp/lerp); fora deles a edição entra/sai em 4 frames. Cada osso/valor tem as suas próprias chaves.
+ *     CM = Configuração de Mão (só os dedos); o pulso e o braço são faixas separadas.
  * ===================================================================== */
 const EDIT_RAMP = 4;
-const edits = { pins: [], poses: [] };
+const edits = { pins: [], tracks: [] };
 const sel = { a: null, b: null };
 let edMode = null, edId = 1, tc = null;
+const lastTrack = {};
 const PART_NAME = { 4: 'polegar', 8: 'indicador', 12: 'médio', 16: 'anelar', 20: 'mindinho', 9: 'palma', 0: 'punho' };
 const TARGET_NAME = { 'f:forehead': 'testa', 'f:nose': 'nariz', 'f:mouth': 'boca', 'f:chin': 'queixo', 'f:cheekL': 'bochecha esq.', 'f:cheekR': 'bochecha dir.',
                       'b:chest': 'peito', 'b:shoulderL': 'ombro esq.', 'b:shoulderR': 'ombro dir.' };
 const SIDE_NAME = { left: 'esq.', right: 'dir.' };
 const FING_PT = { Thumb: 'Polegar', Index: 'Indicador', Middle: 'Médio', Ring: 'Anelar', Little: 'Mindinho' };
+const KIND_NAME = { cm: 'CM', pulso: 'pulso', braco: 'braço', pose: 'pose' };
 
-function rampW(i, e) {                       // peso 0..1 do intervalo [a,b], com rampa nas duas pontas
+function rampW(i, e) {                       // ponto fixo: peso 0..1 do intervalo [a,b], com rampa nas duas pontas (por dentro)
   if (i < e.a || i > e.b) return 0;
   const R = Math.min(EDIT_RAMP, Math.floor((e.b - e.a) / 2));
   return Math.min(1, (i - e.a + 1) / (R + 1), (e.b - i + 1) / (R + 1));
+}
+function outW(i, f0, f1) {
+  if (i < f0 || i > f1) return 0;
+  const R = Math.min(EDIT_RAMP, Math.floor((f1 - f0) / 2));
+  if (R <= 0) return 1;
+  return Math.min(1, (i - f0 + 1) / (R + 1), (f1 - i + 1) / (R + 1));
 }
 function contactsAt(i) {                     // pontos fixos ativos no frame i (no formato que o retargetFrame entende)
   const out = { left: null, right: null };
@@ -1914,13 +2129,48 @@ function contactsAt(i) {                     // pontos fixos ativos no frame i (
   }
   return out;
 }
-function editsAt(i) {                        // ajustes de pose ativos no frame i
-  const out = [];
-  for (const e of edits.poses) {
-    const w = rampW(i, e);
-    if (w > 0) out.push({ w, items: e.items.map(it => ({ bone: bones[it.name], q: it.q })) });
+/* Valor da faixa no frame i: por osso, interpola entre as chaves que o contêm (slerp); idem o deslocamento do braço (lerp). */
+function evalTrack(tr, i) {
+  const out = { items: [], arm: null };
+  const per = new Map();
+  for (const k of tr.keys) for (const it of k.items) { if (!per.has(it.name)) per.set(it.name, []); per.get(it.name).push({ f: k.f, q: it.q }); }
+  const seg = (arr, f0, f1) => { let j = 0; while (j + 1 < arr.length - 1 && arr[j + 1].f <= i) j++; return [arr[j], arr[j + 1], (i - arr[j].f) / (arr[j + 1].f - arr[j].f)]; };
+  for (const [name, arr] of per) {
+    const f0 = arr[0].f, f1 = arr[arr.length - 1].f, w = outW(i, f0, f1);
+    if (w <= 0) continue;
+    let q;
+    if (i <= f0) q = arr[0].q; else if (i >= f1) q = arr[arr.length - 1].q;
+    else { const [A, B, t] = seg(arr); q = A.q.clone().slerp(B.q, t); }
+    out.items.push({ name, q, w });
   }
-  return out.length ? out : null;
+  const ak = tr.keys.filter(k => k.arm);
+  if (ak.length) {
+    const f0 = ak[0].f, f1 = ak[ak.length - 1].f, w = outW(i, f0, f1);
+    if (w > 0) {
+      let wr, el;
+      if (i <= f0) { wr = ak[0].arm.wrist; el = ak[0].arm.elbow; }
+      else if (i >= f1) { wr = ak[ak.length - 1].arm.wrist; el = ak[ak.length - 1].arm.elbow; }
+      else { let j = 0; while (j + 1 < ak.length - 1 && ak[j + 1].f <= i) j++; const A = ak[j], B = ak[j + 1], t = (i - A.f) / (B.f - A.f);
+             wr = A.arm.wrist.clone().lerp(B.arm.wrist, t); el = A.arm.elbow.clone().lerp(B.arm.elbow, t); }
+      out.arm = { wrist: wr.clone().multiplyScalar(w), elbow: el.clone().multiplyScalar(w) };
+    }
+  }
+  return out;
+}
+function editsAt(i) {                        // ajustes de ossos ativos no frame i (cada item com o seu peso)
+  const items = [];
+  for (const tr of edits.tracks) for (const it of evalTrack(tr, i).items) { const b = bones[it.name]; if (b) items.push({ bone: b, q: it.q, w: it.w }); }
+  return items.length ? [{ w: 1, items }] : null;
+}
+function armEditsAt(i, excludeId = null) {   // deslocamentos de punho/cotovelo ativos no frame i (soma das faixas de braço)
+  const out = { left: null, right: null };
+  for (const tr of edits.tracks) {
+    if (tr.kind !== 'braco' || tr.id === excludeId) continue;
+    const a = evalTrack(tr, i).arm; if (!a) continue;
+    const o = out[tr.side] ||= { wrist: V3(), elbow: V3() };
+    o.wrist.add(a.wrist); o.elbow.add(a.elbow);
+  }
+  return (out.left || out.right) ? out : null;
 }
 function boneLabel(b) {
   const key = Object.keys(mapping).find(k => mapping[k] === b.name) || '';
@@ -1932,27 +2182,43 @@ function boneLabel(b) {
   const ti = rig?.torso.indexOf(b); if (ti >= 0) return `Tronco ${ti + 1}`;
   return b.name;
 }
+const trackTitle = tr => `${tr.kind === 'pose' ? '🦴 pose' : (tr.kind === 'cm' ? '🖐 CM' : tr.kind === 'pulso' ? '✋ pulso' : '💪 braço') + ' ' + SIDE_NAME[tr.side]} #${tr.id}`;
+const trackKey = (kind, side) => kind + (kind === 'pose' ? '' : side);
 function updateRangeLabel() {
   $('edRange').textContent = sel.a == null ? 'não definido'
     : `${sel.a + 1} – ${(sel.b ?? sel.a) + 1}  (${(sel.a / track.fps).toFixed(2)} – ${(((sel.b ?? sel.a) + 1) / track.fps).toFixed(2)} s)`;
 }
+function gotoFrame(f) {
+  if (!anim || edMode) return;
+  playing = false; $('playBtn').textContent = '▶ Reproduzir';
+  playT = f / anim.fps; setPlayFrame(playT);
+}
 function refreshEdits() {
   const box = $('edList'); if (!box) return;
   box.innerHTML = '';
-  const add = (text, onDel) => {
-    const d = document.createElement('div'); d.className = 'edItem';
-    const sp = document.createElement('span'); sp.textContent = text;
-    const bt = document.createElement('button'); bt.className = 'dng'; bt.textContent = '✕'; bt.title = 'apagar';
-    bt.onclick = () => { onDel(); drawStrip(); refreshEdits(); applyTracking(true); };
-    d.append(sp, bt); box.appendChild(d);
-  };
+  const redo = () => { drawStrip(); refreshEdits(); applyTracking(true); };
+  const mkBtn = (txt, cls, title, fn) => { const b = document.createElement('button'); b.className = cls; b.textContent = txt; b.title = title; b.onclick = fn; return b; };
   const t = e => track ? `[${e.a + 1}–${e.b + 1}] ${(e.a / track.fps).toFixed(2)}–${((e.b + 1) / track.fps).toFixed(2)} s` : '';
   for (const p of edits.pins) {
     const tgt = p.target.type === 'hand' ? `${PART_NAME[p.target.k]} da mão ${SIDE_NAME[p.target.side]}` : TARGET_NAME[`${p.target.key.startsWith('shoulder') || p.target.key === 'chest' ? 'b' : 'f'}:${p.target.key}`];
-    add(`📌 ${PART_NAME[p.k]} ${SIDE_NAME[p.side]} → ${tgt}  ${t(p)}`, () => edits.pins.splice(edits.pins.indexOf(p), 1));
+    const d = document.createElement('div'); d.className = 'edItem';
+    const sp = document.createElement('span'); sp.textContent = `📌 ${PART_NAME[p.k]} ${SIDE_NAME[p.side]} → ${tgt}  ${t(p)}`;
+    d.append(sp, mkBtn('✕', 'dng', 'apagar', () => { edits.pins.splice(edits.pins.indexOf(p), 1); redo(); })); box.appendChild(d);
   }
-  for (const e of edits.poses)
-    add(`${e.kind === 'cm' ? '🖐 CM ' + SIDE_NAME[e.side] : '🦴 pose'} (${e.items.length} ossos)  ${t(e)}`, () => edits.poses.splice(edits.poses.indexOf(e), 1));
+  for (const tr of edits.tracks) {
+    const d = document.createElement('div'); d.className = 'edItem'; d.style.flexDirection = 'column';
+    const head = document.createElement('div'); head.style.cssText = 'display:flex;justify-content:space-between;gap:6px';
+    const sp = document.createElement('span'); sp.textContent = trackTitle(tr);
+    head.append(sp, mkBtn('✕ faixa', 'dng', 'apagar a faixa inteira', () => { edits.tracks.splice(edits.tracks.indexOf(tr), 1); redo(); }));
+    const chips = document.createElement('div'); chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:3px;margin:2px 0';
+    for (const k of tr.keys) {
+      const c = document.createElement('span'); c.style.cssText = 'display:inline-flex;gap:1px';
+      c.append(mkBtn(`◆${k.f + 1}`, 'sec', `ir para o frame ${k.f + 1} (${track ? (k.f / track.fps).toFixed(2) : ''} s)`, () => gotoFrame(k.f)),
+               mkBtn('✕', 'dng', 'remover só este keyframe', () => { tr.keys.splice(tr.keys.indexOf(k), 1); if (!tr.keys.length) edits.tracks.splice(edits.tracks.indexOf(tr), 1); redo(); }));
+      chips.appendChild(c);
+    }
+    d.append(head, chips); box.appendChild(d);
+  }
   if (!box.children.length) box.innerHTML = '<span style="color:#777">nenhuma</span>';
   if (track && $('edRange')) updateRangeLabel();
 }
@@ -1968,69 +2234,209 @@ function drawStrip() {                       // faixa sobre a linha do tempo: on
   }
   if (sel.a != null) { g.fillStyle = '#3388ff88'; g.fillRect(x(sel.a), 0, Math.max(2, x((sel.b ?? sel.a) + 1) - x(sel.a)), H); }
   g.fillStyle = '#0f0'; for (const p of edits.pins) g.fillRect(x(p.a), H - 2, Math.max(2, x(p.b + 1) - x(p.a)), 2);
-  g.fillStyle = '#ff0'; for (const e of edits.poses) g.fillRect(x(e.a), H - 5, Math.max(2, x(e.b + 1) - x(e.a)), 2);
+  g.fillStyle = '#ff0';
+  for (const tr of edits.tracks) {
+    const f0 = tr.keys[0].f, f1 = tr.keys[tr.keys.length - 1].f;
+    g.fillRect(x(f0), H - 5, Math.max(2, x(f1 + 1) - x(f0)), 1);                       // vão entre a 1ª e a última chave
+    for (const k of tr.keys) g.fillRect(x(k.f) - 1, H - 8, 4, 6);                      // cada keyframe
+  }
 }
 
-/* ----- gizmo + bolinhas de seleção de ossos (modo de edição) ----- */
+/* ----- gizmo + bolinhas de seleção (modo de edição) ----- */
 const handleGroup = new THREE.Group(); scene.add(handleGroup);
 let handleMeshes = [];
 function ensureTC() {
   if (tc) return tc;
   tc = new TransformControls(camera, renderer.domElement);
-  tc.setMode('rotate'); tc.setSpace('local'); tc.setSize(0.65);
+  tc.setSize(0.65);
   tc.addEventListener('dragging-changed', e => { controls.enabled = !e.value; });
-  tc.addEventListener('objectChange', () => { if (edMode && tc.object) edMode.dirty.add(tc.object); });
+  tc.addEventListener('objectChange', () => {
+    if (!edMode || !tc.object) return;
+    if (tc.object.userData.proxy) { armFromProxies(); previewFrame(curFrame, armOverride()); return; }
+    edMode.dirty.add(tc.object);
+    if (edMode.kind === 'pulso' && tc.object === edMode.list[0]) { edMode.baseQ = tc.object.quaternion.clone(); for (const id of ['wrTw', 'wrFl', 'wrDv']) { $(id).value = 0; $(id + 'V').textContent = '0°'; } }
+  });
   scene.add(tc);
   return tc;
 }
-function editableBones(type, side) {
-  if (type === 'cm') return handBoneList(side).slice(1).filter(Boolean);                    // só os dedos (15)
+function editableBones(kind, side) {
+  if (kind === 'cm') return handBoneList(side).slice(1).filter(Boolean);                    // só os dedos (15)
+  if (kind === 'pulso') return [rig[side].hand].filter(Boolean);
+  if (kind === 'braco') return [];
   const l = [...rig.torso, rig.neck, rig.head];
   for (const sd of ['left', 'right']) { const R = rig[sd]; l.push(R.upper, R.fore, R.hand); }
   return l.filter(Boolean);
 }
-function selectBone(b) { ensureTC().attach(b); $('edBone').value = String(edMode.list.indexOf(b)); }
-function enterEdit(type, side) {
+function selectBone(b) { ensureTC().setMode('rotate'); tc.setSpace('local'); tc.attach(b); $('edBone').value = String(edMode.list.indexOf(b)); }
+function selectProxy(m) { ensureTC().setMode('translate'); tc.setSpace('world'); tc.attach(m); $('edArmPt').value = m.userData.proxy; }
+
+/* preview EXATO de um frame: reexecuta o retargeting com as entradas guardadas e uma cópia do estado de persistência */
+function previewFrame(i, armOv) {
+  const inp = frameInputs[i];
+  if (!inp) return false;
+  const holds = holdSnaps[i] ? { left: holdSnaps[i].left.clone(), right: holdSnaps[i].right.clone() } : null;
+  retargetHeld({ ...inp, armEdits: armOv === undefined ? inp.armEdits : armOv }, holds);
+  return true;
+}
+function armOverride() {                     // deslocamentos das OUTRAS faixas + os que o usuário está arrastando agora
+  const ov = armEditsAt(curFrame, edMode.trackId) || { left: null, right: null };
+  const s = edMode.side, o = ov[s] || { wrist: V3(), elbow: V3() };
+  ov[s] = { wrist: o.wrist.clone().add(edMode.off.wrist), elbow: o.elbow.clone().add(edMode.off.elbow) };
+  return ov;
+}
+function armFromProxies() {
+  edMode.off.wrist.copy(edMode.proxies.wrist.position).sub(edMode.base.wr);
+  edMode.off.elbow.copy(edMode.proxies.elbow.position).sub(edMode.base.el);
+}
+function armSetup() {                        // posições SEM os deslocamentos desta faixa; bolinhas = base + deslocamento atual
+  const ex = edMode.trackId;
+  if (!previewFrame(curFrame, armEditsAt(curFrame, ex))) return false;
+  const g = limbNow(edMode.side);
+  edMode.base = { wr: g.wr.clone(), el: g.el.clone() };
+  const tr = edits.tracks.find(x => x.id === ex), cur = tr ? evalTrack(tr, curFrame).arm : null;
+  edMode.off = { wrist: cur ? cur.wrist.clone() : V3(), elbow: cur ? cur.elbow.clone() : V3() };
+  edMode.proxies.wrist.position.copy(edMode.base.wr).add(edMode.off.wrist);
+  edMode.proxies.elbow.position.copy(edMode.base.el).add(edMode.off.elbow);
+  previewFrame(curFrame, armOverride());
+  return true;
+}
+function fillTrackSelect() {
+  const kind = edMode.kind, side = edMode.side;
+  const opts = ['<option value="">(nova faixa)</option>'];
+  for (const tr of edits.tracks) if (tr.kind === kind && (kind === 'pose' || tr.side === side)) opts.push(`<option value="${tr.id}">${trackTitle(tr)} (${tr.keys.length} keys)</option>`);
+  $('edTrack').innerHTML = opts.join('');
+  const last = lastTrack[trackKey(kind, side)];
+  edMode.trackId = edits.tracks.some(t => t.id === last) ? last : null;
+  $('edTrack').value = edMode.trackId == null ? '' : String(edMode.trackId);
+}
+function enterEdit(kind, side) {
   if (!anim || !avatar) { setStatus('Rastreie o vídeo primeiro.'); return; }
   if (edMode) exitEdit(true);
   playing = false; $('playBtn').textContent = '▶ Reproduzir';
-  const list = editableBones(type, side);
-  edMode = { type, side, list, dirty: new Set(), start: new Map(list.map(b => [b, b.quaternion.clone()])) };
-  handleMeshes = list.map(b => {
-    const m = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 10), new THREE.MeshBasicMaterial({ color: 0xffdd00, depthTest: false, transparent: true, opacity: 0.9 }));
-    m.renderOrder = 1000; m.userData.bone = b; handleGroup.add(m); return m;
-  });
-  $('edBone').innerHTML = list.map((b, i) => `<option value="${i}">${boneLabel(b)}</option>`).join('');
-  $('edBone').value = '0';
-  $('edPresetRow').style.display = type === 'cm' ? '' : 'none';
-  $('edModeTitle').textContent = type === 'cm' ? `Ajustando CM da mão ${SIDE_NAME[side]} (frame ${curFrame + 1})` : `Ajustando pose (frame ${curFrame + 1})`;
-  $('edMode').style.display = '';
+  const list = editableBones(kind, side);
+  edMode = { kind, side, list, dirty: new Set(), start: new Map(list.map(b => [b, b.quaternion.clone()])), trackId: null,
+             baseQ: kind === 'pulso' ? list[0].quaternion.clone() : null, proxies: {}, off: null, base: null };
+  fillTrackSelect();
   for (const id of ['timeRange', 'playBtn', 'edPrev', 'edNext']) $(id).disabled = true;
-  selectBone(list[0]);
-  setStatus('Edição: gire os ossos; depois defina o intervalo [início…fim] e clique "Fixar no intervalo".');
+  $('edBoneRow').style.display = list.length ? '' : 'none';
+  $('edCmRow').style.display = kind === 'cm' ? '' : 'none';
+  $('edWristRow').style.display = kind === 'pulso' ? '' : 'none';
+  $('edArmRow').style.display = kind === 'braco' ? '' : 'none';
+  for (const id of ['wrTw', 'wrFl', 'wrDv']) { $(id).value = 0; $(id + 'V').textContent = '0°'; }
+  $('edModeTitle').textContent = `${kind === 'pose' ? 'Pose' : KIND_NAME[kind] + ' ' + SIDE_NAME[side]} — frame ${curFrame + 1} (${(curFrame / anim.fps).toFixed(2)} s)`;
+  $('edHint').textContent = {
+    cm: 'Gire os dedos (bolinhas amarelas + gizmo) ou aplique uma CM pronta/do cmkeeper. Depois grave o keyframe.',
+    pulso: 'Use os sliders (giro da palma = "em pé"/"deitada") ou o gizmo na bolinha do punho.',
+    braco: 'Arraste a bolinha azul (punho) e a rosa (cotovelo) no espaço para afastar o braço do rosto/corpo.',
+    pose: 'Gire qualquer osso do tronco/cabeça/braços com o gizmo.',
+  }[kind];
+  $('edMode').style.display = '';
+  if (kind === 'braco') {
+    for (const [nm, col] of [['wrist', 0x33ccff], ['elbow', 0xff66cc]]) {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 12), new THREE.MeshBasicMaterial({ color: col, depthTest: false, transparent: true, opacity: 0.9 }));
+      m.renderOrder = 1000; m.userData.proxy = nm; handleGroup.add(m); handleMeshes.push(m); edMode.proxies[nm] = m;
+    }
+    if (!armSetup()) { setStatus('Este frame não tem dados de pose para ajustar.'); exitEdit(true); return; }
+    selectProxy(edMode.proxies.wrist);
+  } else {
+    handleMeshes = list.map(b => {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 10), new THREE.MeshBasicMaterial({ color: 0xffdd00, depthTest: false, transparent: true, opacity: 0.9 }));
+      m.renderOrder = 1000; m.userData.bone = b; handleGroup.add(m); return m;
+    });
+    $('edBone').innerHTML = list.map((b, i) => `<option value="${i}">${boneLabel(b)}</option>`).join('');
+    selectBone(list[0]);
+  }
+  setStatus('Edição aberta: ajuste e clique "◆ Gravar keyframe neste frame" (ou "Fixar no intervalo").');
 }
 function exitEdit(restore) {
   if (!edMode) return;
+  const wasArm = edMode.kind === 'braco', f = curFrame;
   if (restore) edMode.list.forEach(b => b.quaternion.copy(edMode.start.get(b)));
   tc?.detach(); controls.enabled = true;
   handleMeshes.forEach(m => handleGroup.remove(m)); handleMeshes = [];
   edMode = null; $('edMode').style.display = 'none';
   for (const id of ['timeRange', 'edPrev', 'edNext']) $(id).disabled = false;
   $('playBtn').disabled = !anim;
+  if (wasArm && restore && anim) previewFrame(f, armEditsAt(f));                              // volta ao frame como estava
   if (avatar) avatar.updateMatrixWorld(true);
 }
 function updateHandles() {
   if (!edMode) return;
   const r = headH * 0.035;
-  for (const m of handleMeshes) { m.position.copy(worldPos(m.userData.bone)); m.scale.setScalar(m.userData.bone === tc?.object ? r * 1.6 : r); }
+  for (const m of handleMeshes) {
+    if (m.userData.proxy) { m.scale.setScalar(m === tc?.object ? r * 2.4 : r * 1.9); continue; }
+    m.position.copy(worldPos(m.userData.bone)); m.scale.setScalar(m.userData.bone === tc?.object ? r * 1.6 : r);
+  }
 }
 renderer.domElement.addEventListener('pointerup', e => {
   if (!edMode || !pdown || Math.hypot(e.clientX - pdown.x, e.clientY - pdown.y) > 5 || tc?.dragging) return;
   const r = renderer.domElement.getBoundingClientRect();
   raycaster.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
   const hit = raycaster.intersectObjects(handleMeshes, false)[0];
-  if (hit) selectBone(hit.object.userData.bone);
+  if (!hit) return;
+  if (hit.object.userData.proxy) selectProxy(hit.object); else selectBone(hit.object.userData.bone);
 });
+
+/* ----- gravar keyframes ----- */
+function recordKeys(frames) {
+  const kind = edMode.kind, side = edMode.side;
+  const items = [...edMode.dirty].map(b => ({ name: b.name, q: b.quaternion.clone() }));
+  const arm = kind === 'braco' ? { wrist: edMode.off.wrist.clone(), elbow: edMode.off.elbow.clone() } : null;
+  if (kind !== 'braco' && !items.length) { setStatus('Nada foi alterado: gire algum osso, use os sliders ou aplique uma CM.'); return false; }
+  let tr = edits.tracks.find(x => x.id === edMode.trackId);
+  if (!tr) { tr = { id: edId++, kind, side: kind === 'pose' ? 'left' : side, keys: [] }; edits.tracks.push(tr); }
+  for (const f of frames) {
+    const key = { f, items: items.map(it => ({ name: it.name, q: it.q.clone() })), arm: arm ? { wrist: arm.wrist.clone(), elbow: arm.elbow.clone() } : null };
+    const old = tr.keys.findIndex(k => k.f === f);
+    if (old >= 0) tr.keys[old] = key; else tr.keys.push(key);
+  }
+  tr.keys.sort((a, b) => a.f - b.f);
+  lastTrack[trackKey(kind, side)] = tr.id;
+  return tr;
+}
+function finishRecord(tr, msg) {
+  exitEdit(false); drawStrip(); refreshEdits(); applyTracking(true);
+  setStatus(`${msg} — faixa ${trackTitle(tr)} com ${tr.keys.length} keyframe(s). Vá a outro frame e repita para animar entre eles.`);
+}
+
+/* ----- CMs registradas (cmkeeper.json) ----- */
+function describeCM(cm) {
+  const fx = landmarkFlexions(cm.L), f = n => fx.fingers[n].map(v => v.toFixed(0)).join('/');
+  const flip = fx.decisive && fx.palmarZ * (cm.side === 'right' ? 1 : -1) < 0;
+  return `mão ${cm.side === 'right' ? 'direita' : 'esquerda'} · polegar ${f('thumb')}° · indicador ${f('index')}° · médio ${f('middle')}° · anelar ${f('ring')}° · mínimo ${f('pinky')}°`
+       + (fx.decisive ? (flip ? ' · arquivo espelhado (corrigido sozinho)' : ' · lateralidade conferida pelos dedos') : ' · dedos quase retos (sem como conferir o espelhamento: use "inverter" se ficar ao contrário)');
+}
+function fillPresetSelect() {
+  const keep = $('edPreset').value;
+  let h = '<optgroup label="Prontas">' + Object.keys(CM_PRESETS).map(n => `<option value="${n}">${n}</option>`).join('') + '</optgroup>';
+  if (customCMs.length) h += `<optgroup label="Minhas CMs (${customCMs.length})">` + customCMs.map((c, i) => `<option value="cm:${i}">${c.nome.replace(/</g, '&lt;')}</option>`).join('') + '</optgroup>';
+  $('edPreset').innerHTML = h;
+  if ([...$('edPreset').options].some(o => o.value === keep)) $('edPreset').value = keep;
+  updatePresetInfo();
+}
+function updatePresetInfo() {
+  const v = $('edPreset').value, cm = v.startsWith('cm:') ? customCMs[+v.slice(3)] : null;
+  const img = $('cmThumb');
+  if (cm?.thumb) { img.src = cm.thumb; img.style.display = ''; } else { img.removeAttribute('src'); img.style.display = 'none'; }
+  $('cmDesc').textContent = cm ? describeCM(cm) : '';
+}
+function loadCMs(data, origem) {
+  const r = parseCMKeeper(data);
+  customCMs.length = 0; customCMs.push(...r.cms);
+  const R = r.cms.filter(c => c.side === 'right').length;
+  $('cmInfo').textContent = r.cms.length ? `${r.cms.length} CMs de ${origem} (${R} mão direita, ${r.cms.length - R} esquerda)${r.skipped ? ` · ${r.skipped} descartadas` : ''}` : 'nenhuma CM válida no arquivo';
+  log(`cmkeeper: ${r.cms.length} CMs carregadas de ${origem}${r.skipped ? `, ${r.skipped} descartadas (landmarks incompletos)` : ''}.`);
+  fillPresetSelect();
+}
+$('cmLoad').addEventListener('click', () => $('cmFile').click());
+$('cmFile').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try { const text = await f.text(); loadCMs(JSON.parse(text), f.name); try { localStorage.setItem('cmkeeper.v1', text); } catch { /* sem armazenamento: tudo bem */ } }
+  catch (err) { log('⚠ cmkeeper.json inválido: ' + err.message); }
+  e.target.value = '';
+});
+$('edPreset').addEventListener('change', updatePresetInfo);
+try { const saved = localStorage.getItem('cmkeeper.v1'); if (saved) loadCMs(JSON.parse(saved), 'sessão anterior'); } catch { /* ignora */ }
 
 /* ----- visualização dos volumes de colisão ----- */
 const volGroup = new THREE.Group(); scene.add(volGroup);
@@ -2075,8 +2481,7 @@ function updateVolumes() {
 /* ----- ligação dos botões do editor ----- */
 function stepFrame(d) {
   if (!anim || edMode) return;
-  playing = false; $('playBtn').textContent = '▶ Reproduzir';
-  playT = Math.min(anim.N - 1, Math.max(0, curFrame + d)) / anim.fps; setPlayFrame(playT);
+  gotoFrame(Math.min(anim.N - 1, Math.max(0, curFrame + d)));
 }
 $('edPrev').addEventListener('click', () => stepFrame(-1));
 $('edNext').addEventListener('click', () => stepFrame(1));
@@ -2093,30 +2498,48 @@ $('pinAdd').addEventListener('click', () => {
   drawStrip(); refreshEdits(); applyTracking(true);
   setStatus(`Ponto fixo criado: ${PART_NAME[k]} ${SIDE_NAME[side]} → ${TARGET_NAME[tv] || 'outra mão'} durante ${(sel.a / track.fps).toFixed(2)}–${((sel.b + 1) / track.fps).toFixed(2)} s.`);
 });
-$('cmL').addEventListener('click', () => enterEdit('cm', 'left'));
-$('cmR').addEventListener('click', () => enterEdit('cm', 'right'));
-$('poseEd').addEventListener('click', () => enterEdit('pose', 'left'));
+for (const [id, kind, side] of [['cmL', 'cm', 'left'], ['cmR', 'cm', 'right'], ['wrL', 'pulso', 'left'], ['wrR', 'pulso', 'right'], ['arL', 'braco', 'left'], ['arR', 'braco', 'right'], ['poseEd', 'pose', 'left']])
+  $(id).addEventListener('click', () => enterEdit(kind, side));
 $('edBone').addEventListener('change', e => { if (edMode) selectBone(edMode.list[+e.target.value]); });
-$('edPreset').innerHTML = Object.keys(CM_PRESETS).map(n => `<option>${n}</option>`).join('');
+$('edArmPt').addEventListener('change', e => { if (edMode?.kind === 'braco') selectProxy(edMode.proxies[e.target.value]); });
+$('edArmZero').addEventListener('click', () => {
+  if (edMode?.kind !== 'braco') return;
+  edMode.off.wrist.set(0, 0, 0); edMode.off.elbow.set(0, 0, 0);
+  edMode.proxies.wrist.position.copy(edMode.base.wr); edMode.proxies.elbow.position.copy(edMode.base.el);
+  previewFrame(curFrame, armOverride());
+});
+$('edTrack').addEventListener('change', e => { if (!edMode) return; edMode.trackId = e.target.value === '' ? null : +e.target.value; if (edMode.kind === 'braco') armSetup(); });
 $('edPresetBtn').addEventListener('click', () => {
-  if (!edMode || edMode.type !== 'cm') return;
-  for (const [b, q] of presetQuats(edMode.side, $('edPreset').value)) { b.quaternion.copy(q); edMode.dirty.add(b); }
+  if (!edMode || edMode.kind !== 'cm') return;
+  const m = presetQuatsAny(edMode.side, $('edPreset').value, { invert: $('cmInvert').checked });
+  if (!m.size) { setStatus('Não foi possível montar essa CM (faltam ossos de dedos no avatar?).'); return; }
+  for (const [b, q] of m) { b.quaternion.copy(q); edMode.dirty.add(b); }
   avatar.updateMatrixWorld(true);
 });
+for (const [id, label] of [['wrTw', 'twist'], ['wrFl', 'flex'], ['wrDv', 'dev']]) $(id).addEventListener('input', () => {
+  if (!edMode || edMode.kind !== 'pulso') return;
+  const v = k => +$(k).value;
+  for (const k of ['wrTw', 'wrFl', 'wrDv']) $(k + 'V').textContent = v(k) + '°';
+  const hand = edMode.list[0];
+  hand.quaternion.copy(wristAdjust(edMode.side, edMode.baseQ, v('wrTw'), v('wrFl'), v('wrDv')));
+  edMode.dirty.add(hand); avatar.updateMatrixWorld(true);
+});
+$('edKey').addEventListener('click', () => { if (!edMode) return; const tr = recordKeys([curFrame]); if (tr) finishRecord(tr, `Keyframe gravado no frame ${curFrame + 1}`); });
 $('edFix').addEventListener('click', () => {
   if (!edMode) return;
   if (sel.a == null || sel.b == null) { setStatus('Defina o intervalo primeiro ("[ início aqui" / "fim aqui ]"); a edição continua aberta.'); return; }
-  const items = [...edMode.dirty].map(b => ({ name: b.name, q: b.quaternion.clone() }));
-  if (!items.length) { setStatus('Nada foi alterado: gire algum osso ou aplique uma CM pronta.'); return; }
-  edits.poses.push({ id: edId++, kind: edMode.type, side: edMode.side, a: sel.a, b: sel.b, items });
-  exitEdit(false); drawStrip(); refreshEdits(); applyTracking(true);
-  setStatus('Ajuste fixado no intervalo.');
+  const savedId = edMode.trackId;
+  edMode.trackId = null;                        // ◀ FORÇA FAIXA NOVA: cada "Fixar no intervalo" = uma faixa independente
+  const tr = recordKeys(sel.a === sel.b ? [sel.a] : [sel.a, sel.b]);
+  if (!tr) edMode.trackId = savedId;            // se algo deu errado, restaura
+  if (tr) finishRecord(tr, `Pose fixada nos frames ${sel.a + 1}–${sel.b + 1}`);
 });
 $('edCancel').addEventListener('click', () => { exitEdit(true); setStatus('Edição cancelada.'); });
 $('torsoScale').addEventListener('input', e => { $('torsoVal').textContent = (+e.target.value).toFixed(2); });
 $('torsoScale').addEventListener('change', () => track && applyTracking(true));
 
 /* ---------- Console ---------- */
+window.limparCacheRastreio = async () => { await cacheClear(); if (track) track.key = null; return 'cache de rastreio apagado'; };   // sem botão: use no console se mudar a lógica do rastreio
 window.showBones   = () => console.log(Object.keys(bones));
 window.showMapping = () => console.log(mapping);
 window.remap = (logical, boneName) => {

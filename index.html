@@ -34,6 +34,10 @@
   #editor hr { border:0; border-top:1px solid #333; margin:6px 0; }
   .edItem { display:flex; justify-content:space-between; gap:6px; padding:2px 0; border-bottom:1px solid #222; }
   button.dng { background:#a33; padding:1px 7px; }
+  .edBlock { border:1px solid #333; border-radius:4px; margin:4px 0; padding:3px 5px; background:#0a0a0a; }
+  .edBlock .hd { display:flex; justify-content:space-between; align-items:center; gap:6px; font-weight:600; color:#9cf; }
+  .edSub { display:flex; justify-content:space-between; align-items:center; gap:6px; padding:2px 0 2px 10px; border-top:1px solid #1d1d1d; }
+  .edSub.ghost { opacity:.5; }
   #strip { width:100%; height:16px; display:block; background:#111; border-radius:3px; margin-bottom:3px; }
   #video { position:fixed; left:0; top:0; width:4px; height:4px; opacity:0.01; pointer-events:none; }
 </style>
@@ -90,6 +94,8 @@
   <div id="editor">
     <div class="row"><b>✎ Editor de animação</b> <button id="edToggle" class="sec">–</button></div>
     <div id="edBody">
+      <div class="row"><button id="edUndo" class="sec" disabled title="Desfaz o último ajuste feito (CM, pulso, braço, pose ou ponto fixo).">↶ Desfazer</button></div>
+      <button id="edRedo" class="sec" disabled title="Refaz a última mudança desfeita.">↷ Refazer</button>
       <div class="row">Frame <b id="edFrame">–</b> <button id="edPrev" class="sec" title="frame anterior">◀</button><button id="edNext" class="sec" title="próximo frame">▶</button></div>
       <div class="row">Intervalo: <b id="edRange">não definido</b></div>
       <div class="row"><button id="edSetA" class="sec">[ início aqui</button><button id="edSetB" class="sec">fim aqui ]</button><button id="edClr" class="sec">limpar</button></div>
@@ -132,7 +138,7 @@
         <div class="row" style="color:#999" id="edHint"></div>
       </div>
       <hr>
-      <h4>Edições</h4><div id="edList"><span style="color:#777">nenhuma</span></div>
+      <h4>Histórico de edições <span style="font-weight:normal;color:#777">(mais recente no topo)</span></h4><div id="edList"><span style="color:#777">nenhuma</span></div>
     </div>
   </div>
   <div id="log"></div>
@@ -1487,7 +1493,7 @@ function loadAvatar(buf) {
         if (avatar) scene.remove(avatar);
         clearMarkers(); calib = null; exitEdit(true);
         if (edits.pins.length + edits.tracks.length) log('Avatar novo: pontos fixos e ajustes anteriores foram limpos.');
-        edits.pins.length = 0; edits.tracks.length = 0;
+        clearAllEdits();
         const root = gltf.scene;
         root.traverse(o => { if (o.isMesh) o.frustumCulled = false; });
         scene.add(root);
@@ -1693,7 +1699,7 @@ async function cacheSaveTrack(key) {                      // só dados BRUTOS do
 }
 function resetEditsForNewTrack() {
   if ((edits.pins.length + edits.tracks.length) && !confirm('Trocar o rastreio apaga os pontos fixos e ajustes criados. Continuar?')) return false;
-  edits.pins.length = 0; edits.tracks.length = 0; sel.a = sel.b = null; exitEdit(true);
+  clearAllEdits(); sel.a = sel.b = null; exitEdit(true);
   playing = false; $('playBtn').textContent = '▶ Reproduzir';
   return true;
 }
@@ -2076,7 +2082,7 @@ $('mirror').addEventListener('change', () => track && applyTracking());
 $('smooth').addEventListener('input', e => { $('smoothVal').textContent = e.target.value + ' ms'; });
 $('smooth').addEventListener('change', () => track && applyTracking());
 $('resetBtn').addEventListener('click', () => {
-  exitEdit(true); edits.pins.length = 0; edits.tracks.length = 0; sel.a = sel.b = null; refreshEdits();
+  exitEdit(true); clearAllEdits(); sel.a = sel.b = null; refreshEdits();
   playing = false; anim = null; track = null;
   if (avatar) resetPose();
   $('timeline').style.display = 'none'; $('exportBtn').disabled = true; $('playBtn').disabled = true;
@@ -2091,7 +2097,7 @@ $('resetBtn').addEventListener('click', () => {
  *     CM = Configuração de Mão (só os dedos); o pulso e o braço são faixas separadas.
  * ===================================================================== */
 const EDIT_RAMP = 4;
-const edits = { pins: [], tracks: [] };
+const edits = { pins: [], tracks: [], log: [] };   // log = HISTÓRICO em pilha (ordem de criação; o último é o topo)
 const sel = { a: null, b: null };
 let edMode = null, edId = 1, tc = null;
 const lastTrack = {};
@@ -2107,11 +2113,10 @@ function rampW(i, e) {                       // ponto fixo: peso 0..1 do interva
   const R = Math.min(EDIT_RAMP, Math.floor((e.b - e.a) / 2));
   return Math.min(1, (i - e.a + 1) / (R + 1), (e.b - i + 1) / (R + 1));
 }
-function outW(i, f0, f1) {
-  if (i < f0 || i > f1) return 0;
-  const R = Math.min(EDIT_RAMP, Math.floor((f1 - f0) / 2));
-  if (R <= 0) return 1;
-  return Math.min(1, (i - f0 + 1) / (R + 1), (f1 - i + 1) / (R + 1));
+function outW(i, f0, f1) {                   // keyframes: peso 1 entre a 1ª e a última chave; rampa de EDIT_RAMP frames POR FORA
+  if (i >= f0 && i <= f1) return 1;
+  const d = i < f0 ? f0 - i : i - f1;
+  return d > EDIT_RAMP ? 0 : 1 - d / (EDIT_RAMP + 1);
 }
 function contactsAt(i) {                     // pontos fixos ativos no frame i (no formato que o retargetFrame entende)
   const out = { left: null, right: null };
@@ -2166,6 +2171,127 @@ function armEditsAt(i, excludeId = null) {   // deslocamentos de punho/cotovelo 
   }
   return (out.left || out.right) ? out : null;
 }
+/* ---------- Histórico em pilha (só bookkeeping: NÃO altera o motor de edição) ----------
+ * Cada operação de gravação (pin, "Gravar keyframe", "Fixar no intervalo") vira UMA entrada em edits.log, com
+ * seq (ordem global), ts (timestamp) e range = [a,b] do intervalo selecionado quando foi feita.
+ * As chaves de uma faixa levam opSeq (qual operação as criou) para que cada operação possa ser desfeita sozinha. */
+let editSeq = 0;
+const redoStack = [];
+function selRange(frames) {                  // intervalo "original" da operação: o selecionado (se cobre os frames) ou o próprio frame
+  const lo = Math.min(...frames), hi = Math.max(...frames);
+  return (sel.a != null && sel.b != null && sel.a <= lo && sel.b >= hi) ? { a: sel.a, b: sel.b } : { a: lo, b: hi };
+}
+function logPin(p) {    
+  redoStack.length = 0;                     // chamar logo depois de edits.pins.push(p)
+  const seq = ++editSeq, ts = Date.now(), range = { a: p.a, b: p.b };
+  Object.assign(p, { seq, ts, range });
+  edits.log.push({ seq, ts, type: 'pin', range, pin: p, replaced: [] });
+}
+function commitKeys(tr, keys, created) {     // grava as chaves na faixa e registra a operação (guarda as chaves que substituiu)
+  redoStack.length = 0;
+  const seq = ++editSeq, ts = Date.now(), frames = keys.map(k => k.f), range = selRange(frames), replaced = [];
+  if (created) Object.assign(tr, { seq, ts, range });
+  for (const key of keys) {
+    Object.assign(key, { opSeq: seq, ts, range });
+    const old = tr.keys.findIndex(k => k.f === key.f);
+    if (old >= 0) { replaced.push(tr.keys[old]); tr.keys[old] = key; } else tr.keys.push(key);
+  }
+  tr.keys.sort((a, b) => a.f - b.f);
+  edits.log.push({ seq, ts, type: 'key', trackId: tr.id, kind: tr.kind, side: tr.side, frames, range, replaced });
+  return seq;
+}
+function ensureLog() {                       // tolera edições criadas fora da UI: tira entradas órfãs e registra o que faltar
+  for (let i = edits.log.length - 1; i >= 0; i--) {
+    const e = edits.log[i];
+    if (!(e.type === 'pin' ? edits.pins.includes(e.pin) : edits.tracks.some(t => t.id === e.trackId))) edits.log.splice(i, 1);
+  }
+  const logged = new Set(edits.log.map(e => e.pin).filter(Boolean));
+  for (const p of edits.pins) if (!logged.has(p)) logPin(p);
+  for (const tr of edits.tracks) {
+    const orph = tr.keys.filter(k => k.opSeq == null);
+    if (!orph.length) continue;
+    const seq = ++editSeq, ts = Date.now(), frames = orph.map(k => k.f), range = { a: Math.min(...frames), b: Math.max(...frames) };
+    orph.forEach(k => Object.assign(k, { opSeq: seq, ts, range }));
+    edits.log.push({ seq, ts, type: 'key', trackId: tr.id, kind: tr.kind, side: tr.side, frames, range, replaced: [] });
+  }
+}
+function removeEntry(en, keepRedo) {
+  const i = edits.log.indexOf(en); if (i < 0) return false;
+  const snap = { en, trackExisted: false, trackMeta: null, keysOfEntry: [], replacedBackup: [] };
+  if (en.type === 'key') {
+    const tr = edits.tracks.find(t => t.id === en.trackId);
+    if (tr) {
+      snap.trackExisted = true;
+      snap.trackMeta = { id: tr.id, kind: tr.kind, side: tr.side, seq: tr.seq, ts: tr.ts, range: tr.range };
+      snap.keysOfEntry = tr.keys.filter(k => k.opSeq === en.seq).map(k => k);
+      snap.replacedBackup = en.replaced.slice();
+    }
+  }
+  edits.log.splice(i, 1);
+  if (en.type === 'pin') { const j = edits.pins.indexOf(en.pin); if (j >= 0) edits.pins.splice(j, 1); }
+  else {
+    const tr = edits.tracks.find(t => t.id === en.trackId);
+    if (tr) {
+      tr.keys = tr.keys.filter(k => k.opSeq !== en.seq);
+      for (const k of en.replaced) if (!tr.keys.some(x => x.f === k.f)) tr.keys.push(k);
+      tr.keys.sort((a, b) => a.f - b.f);
+      if (!tr.keys.length) {
+        edits.tracks.splice(edits.tracks.indexOf(tr), 1);
+        for (let n = edits.log.length - 1; n >= 0; n--) if (edits.log[n].type === 'key' && edits.log[n].trackId === tr.id) edits.log.splice(n, 1);
+      }
+    }
+  }
+  for (const e of edits.log) if (e.replaced.length) e.replaced = e.replaced.filter(k => k.opSeq !== en.seq);
+  if (!keepRedo) redoStack.push(snap);       // undoLast passa keepRedo=true (o snapshot é empilhado lá, não aqui)
+  return snap;
+}
+function undoLast() {
+  ensureLog();
+  const en = edits.log[edits.log.length - 1];
+  if (!en) return null;
+  removeEntry(en);                            // removeEntry empilha o snapshot no redoStack
+  return en;
+}
+
+function redoLast() {
+  const snap = redoStack.pop(); if (!snap) return null;
+  const en = snap.en;
+  if (en.type === 'pin') {
+    edits.pins.push(en.pin);
+    edits.log.push(en);
+  } else {
+    let tr = edits.tracks.find(t => t.id === en.trackId);
+    if (!tr && snap.trackMeta) {
+      tr = { ...snap.trackMeta, keys: [] };
+      edits.tracks.push(tr);
+    }
+    if (tr) {
+      for (const k of snap.keysOfEntry) {
+        const old = tr.keys.findIndex(x => x.f === k.f);
+        if (old >= 0) tr.keys[old] = k; else tr.keys.push(k);
+      }
+      for (const k of snap.replacedBackup) {
+        tr.keys = tr.keys.filter(x => x.f !== k.f);
+      }
+      tr.keys.sort((a, b) => a.f - b.f);
+    }
+    en.replaced = snap.replacedBackup.slice();
+    edits.log.push(en);
+  }
+  return en;
+}
+
+function groupedBlocks() {                   // um bloco por intervalo distinto; mais recente no topo; sub-itens em ordem de criação
+  ensureLog();
+  const by = new Map();
+  for (const en of edits.log) {
+    const key = `${en.range.a}-${en.range.b}`;
+    if (!by.has(key)) by.set(key, { key, a: en.range.a, b: en.range.b, entries: [], last: 0 });
+    const bl = by.get(key); bl.entries.push(en); bl.last = Math.max(bl.last, en.seq);
+  }
+  return [...by.values()].sort((x, y) => y.last - x.last);
+}
+function clearAllEdits() { edits.pins.length = 0; edits.tracks.length = 0; edits.log.length = 0; redoStack.length = 0; }
 function boneLabel(b) {
   const key = Object.keys(mapping).find(k => mapping[k] === b.name) || '';
   const m = key.match(/^(left|right)(Thumb|Index|Middle|Ring|Little)(\d)$/);
@@ -2187,31 +2313,44 @@ function gotoFrame(f) {
   playing = false; $('playBtn').textContent = '▶ Reproduzir';
   playT = f / anim.fps; setPlayFrame(playT);
 }
-function refreshEdits() {
+const pinLabel = p => {
+  const tgt = p.target.type === 'hand' ? `${PART_NAME[p.target.k]} da mão ${SIDE_NAME[p.target.side]}`
+            : TARGET_NAME[`${p.target.key.startsWith('shoulder') || p.target.key === 'chest' ? 'b' : 'f'}:${p.target.key}`];
+  return `📌 ${PART_NAME[p.k]} ${SIDE_NAME[p.side]} → ${tgt}`;
+};
+const entryLabel = en => en.type === 'pin' ? pinLabel(en.pin)
+  : `${trackTitle({ kind: en.kind, side: en.side, id: en.trackId })}  ◆${en.frames.map(f => f + 1).join('–◆')}`;
+function syncUndoBtn() {
+  const u = $('edUndo'), r = $('edRedo'); if (!u) return;
+  ensureLog();
+  u.disabled = !edits.log.length || !!edMode;
+  if (r) r.disabled = !redoStack.length || !!edMode;
+}
+function refreshEdits() {                    // HISTÓRICO EM PILHA: um bloco por intervalo, mais recente no topo
   const box = $('edList'); if (!box) return;
   box.innerHTML = '';
+  syncUndoBtn();
   const redo = () => { drawStrip(); refreshEdits(); applyTracking(true); };
   const mkBtn = (txt, cls, title, fn) => { const b = document.createElement('button'); b.className = cls; b.textContent = txt; b.title = title; b.onclick = fn; return b; };
-  const t = e => track ? `[${e.a + 1}–${e.b + 1}] ${(e.a / track.fps).toFixed(2)}–${((e.b + 1) / track.fps).toFixed(2)} s` : '';
-  for (const p of edits.pins) {
-    const tgt = p.target.type === 'hand' ? `${PART_NAME[p.target.k]} da mão ${SIDE_NAME[p.target.side]}` : TARGET_NAME[`${p.target.key.startsWith('shoulder') || p.target.key === 'chest' ? 'b' : 'f'}:${p.target.key}`];
-    const d = document.createElement('div'); d.className = 'edItem';
-    const sp = document.createElement('span'); sp.textContent = `📌 ${PART_NAME[p.k]} ${SIDE_NAME[p.side]} → ${tgt}  ${t(p)}`;
-    d.append(sp, mkBtn('✕', 'dng', 'apagar', () => { edits.pins.splice(edits.pins.indexOf(p), 1); redo(); })); box.appendChild(d);
-  }
-  for (const tr of edits.tracks) {
-    const d = document.createElement('div'); d.className = 'edItem'; d.style.flexDirection = 'column';
-    const head = document.createElement('div'); head.style.cssText = 'display:flex;justify-content:space-between;gap:6px';
-    const sp = document.createElement('span'); sp.textContent = trackTitle(tr);
-    head.append(sp, mkBtn('✕ faixa', 'dng', 'apagar a faixa inteira', () => { edits.tracks.splice(edits.tracks.indexOf(tr), 1); redo(); }));
-    const chips = document.createElement('div'); chips.style.cssText = 'display:flex;flex-wrap:wrap;gap:3px;margin:2px 0';
-    for (const k of tr.keys) {
-      const c = document.createElement('span'); c.style.cssText = 'display:inline-flex;gap:1px';
-      c.append(mkBtn(`◆${k.f + 1}`, 'sec', `ir para o frame ${k.f + 1} (${track ? (k.f / track.fps).toFixed(2) : ''} s)`, () => gotoFrame(k.f)),
-               mkBtn('✕', 'dng', 'remover só este keyframe', () => { tr.keys.splice(tr.keys.indexOf(k), 1); if (!tr.keys.length) edits.tracks.splice(edits.tracks.indexOf(tr), 1); redo(); }));
-      chips.appendChild(c);
+  for (const bl of groupedBlocks()) {
+    const wrap = document.createElement('div'); wrap.className = 'edBlock';
+    const hd = document.createElement('div'); hd.className = 'hd';
+    const sp = document.createElement('span');
+    sp.textContent = `${bl.a + 1}–${bl.b + 1}` + (track ? `  (${(bl.a / track.fps).toFixed(2)}–${((bl.b + 1) / track.fps).toFixed(2)} s)` : '') + `  · ${bl.entries.length} ajuste${bl.entries.length > 1 ? 's' : ''}`;
+    hd.append(sp, mkBtn('✕', 'dng', 'apagar TODOS os ajustes deste intervalo', () => { for (const en of [...bl.entries].reverse()) removeEntry(en); redo(); }));
+    wrap.appendChild(hd);
+    for (const en of bl.entries) {           // ordem em que foram feitos (o mais antigo primeiro)
+      const live = en.type === 'pin' || edits.tracks.some(t => t.id === en.trackId && t.keys.some(k => k.opSeq === en.seq));
+      const row = document.createElement('div'); row.className = 'edSub' + (live ? '' : ' ghost');
+      const lab = document.createElement('span');
+      lab.textContent = entryLabel(en) + (live ? '' : ' (substituído por outro)');
+      lab.title = `criado às ${new Date(en.ts).toLocaleTimeString()}`;
+      const btns = document.createElement('span'); btns.style.cssText = 'display:inline-flex;gap:2px';
+      if (en.type === 'key') for (const f of en.frames) btns.appendChild(mkBtn('→', 'sec', `ir para o frame ${f + 1}`, () => gotoFrame(f)));
+      btns.appendChild(mkBtn('✕', 'dng', 'apagar só este ajuste', () => { removeEntry(en); redo(); }));
+      row.append(lab, btns); wrap.appendChild(row);
     }
-    d.append(head, chips); box.appendChild(d);
+    box.appendChild(wrap);
   }
   if (!box.children.length) box.innerHTML = '<span style="color:#777">nenhuma</span>';
   if (track && $('edRange')) updateRangeLabel();
@@ -2341,6 +2480,7 @@ function enterEdit(kind, side) {
     selectBone(list[0]);
   }
   setStatus('Edição aberta: ajuste e clique "◆ Gravar keyframe neste frame" (ou "Fixar no intervalo").');
+  syncUndoBtn();
 }
 function exitEdit(restore) {
   if (!edMode) return;
@@ -2353,6 +2493,7 @@ function exitEdit(restore) {
   $('playBtn').disabled = !anim;
   if (wasArm && restore && anim) previewFrame(f, armEditsAt(f));                              // volta ao frame como estava
   if (avatar) avatar.updateMatrixWorld(true);
+  syncUndoBtn();
 }
 function updateHandles() {
   if (!edMode) return;
@@ -2377,14 +2518,9 @@ function recordKeys(frames) {
   const items = [...edMode.dirty].map(b => ({ name: b.name, q: b.quaternion.clone() }));
   const arm = kind === 'braco' ? { wrist: edMode.off.wrist.clone(), elbow: edMode.off.elbow.clone() } : null;
   if (kind !== 'braco' && !items.length) { setStatus('Nada foi alterado: gire algum osso, use os sliders ou aplique uma CM.'); return false; }
-  let tr = edits.tracks.find(x => x.id === edMode.trackId);
-  if (!tr) { tr = { id: edId++, kind, side: kind === 'pose' ? 'left' : side, keys: [] }; edits.tracks.push(tr); }
-  for (const f of frames) {
-    const key = { f, items: items.map(it => ({ name: it.name, q: it.q.clone() })), arm: arm ? { wrist: arm.wrist.clone(), elbow: arm.elbow.clone() } : null };
-    const old = tr.keys.findIndex(k => k.f === f);
-    if (old >= 0) tr.keys[old] = key; else tr.keys.push(key);
-  }
-  tr.keys.sort((a, b) => a.f - b.f);
+  let tr = edits.tracks.find(x => x.id === edMode.trackId), created = false;
+  if (!tr) { tr = { id: edId++, kind, side: kind === 'pose' ? 'left' : side, keys: [] }; edits.tracks.push(tr); created = true; }
+  commitKeys(tr, frames.map(f => ({ f, items: items.map(it => ({ name: it.name, q: it.q.clone() })), arm: arm ? { wrist: arm.wrist.clone(), elbow: arm.elbow.clone() } : null })), created);
   lastTrack[trackKey(kind, side)] = tr.id;
   return tr;
 }
@@ -2488,7 +2624,8 @@ $('pinAdd').addEventListener('click', () => {
   if (sel.a == null || sel.b == null) { setStatus('Defina o intervalo: "[ início aqui" e "fim aqui ]".'); return; }
   const side = $('pinSide').value, k = +$('pinPart').value, tv = $('pinTarget').value;
   const target = tv.startsWith('h:') ? { type: 'hand', side: side === 'left' ? 'right' : 'left', k: +tv.slice(2) } : { type: 'anchor', key: tv.slice(2) };
-  edits.pins.push({ id: edId++, side, k, target, a: sel.a, b: sel.b });
+  const pin = { id: edId++, side, k, target, a: sel.a, b: sel.b };
+  edits.pins.push(pin); logPin(pin);
   drawStrip(); refreshEdits(); applyTracking(true);
   setStatus(`Ponto fixo criado: ${PART_NAME[k]} ${SIDE_NAME[side]} → ${TARGET_NAME[tv] || 'outra mão'} durante ${(sel.a / track.fps).toFixed(2)}–${((sel.b + 1) / track.fps).toFixed(2)} s.`);
 });
@@ -2522,13 +2659,24 @@ $('edKey').addEventListener('click', () => { if (!edMode) return; const tr = rec
 $('edFix').addEventListener('click', () => {
   if (!edMode) return;
   if (sel.a == null || sel.b == null) { setStatus('Defina o intervalo primeiro ("[ início aqui" / "fim aqui ]"); a edição continua aberta.'); return; }
-  const savedId = edMode.trackId;
-  edMode.trackId = null;                        // ◀ FORÇA FAIXA NOVA: cada "Fixar no intervalo" = uma faixa independente
   const tr = recordKeys(sel.a === sel.b ? [sel.a] : [sel.a, sel.b]);
-  if (!tr) edMode.trackId = savedId;            // se algo deu errado, restaura
   if (tr) finishRecord(tr, `Pose fixada nos frames ${sel.a + 1}–${sel.b + 1}`);
 });
 $('edCancel').addEventListener('click', () => { exitEdit(true); setStatus('Edição cancelada.'); });
+$('edUndo').addEventListener('click', () => {
+  if (edMode) { setStatus('Termine ou cancele a edição aberta antes de desfazer.'); return; }
+  const en = undoLast();
+  if (!en) { setStatus('Nada para desfazer.'); return; }
+  drawStrip(); refreshEdits(); applyTracking(true);
+  setStatus(`Desfeito: ${entryLabel(en)} (intervalo ${en.range.a + 1}–${en.range.b + 1}).`);
+});
+$('edRedo').addEventListener('click', () => {
+  if (edMode) { setStatus('Termine ou cancele a edição aberta antes de refazer.'); return; }
+  const en = redoLast();
+  if (!en) { setStatus('Nada para refazer.'); return; }
+  drawStrip(); refreshEdits(); applyTracking(true);
+  setStatus(`Refeito: ${entryLabel(en)} (intervalo ${en.range.a + 1}–${en.range.b + 1}).`);
+});
 $('torsoScale').addEventListener('input', e => { $('torsoVal').textContent = (+e.target.value).toFixed(2); });
 $('torsoScale').addEventListener('change', () => track && applyTracking(true));
 
