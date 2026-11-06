@@ -18,6 +18,7 @@
   button.sec { background:#357; }
   button:disabled { background:#444; cursor:not-allowed; }
   button:hover:not(:disabled) { filter:brightness(1.15); }
+  button.holding { filter: brightness(1.4) !important; }
   #preview { position:absolute; left:8px; bottom:8px; width:360px; background:#000c; border:1px solid #444; border-radius:6px; padding:4px; z-index:5; }
   #pv { width:100%; display:block; background:#000; border-radius:4px; }
   #pvInfo { font-size:11px; color:#aaa; padding:2px 4px; }
@@ -2669,8 +2670,48 @@ function stepFrame(d) {
   if (!anim || edMode) return;
   gotoFrame(Math.min(anim.N - 1, Math.max(0, curFrame + d)));
 }
-$('edPrev').addEventListener('click', () => stepFrame(-1));
-$('edNext').addEventListener('click', () => stepFrame(1));
+/* Segurar nas setas ◀ ▶ para scrubbing contínuo.
+ * - Clique rápido = 1 frame (comportamento antigo preservado).
+ * - Segurar = avança em "tempo de produção" (1000/anim.fps ms por frame)
+ *   depois de 350 ms de delay inicial (padrão de teclado).
+ * - Para no início/fim da animação ou se entrar no editor (edMode). */
+function attachHoldRepeat(btn, dir) {
+  let initialTimer = null, holdTimer = null, active = false;
+  const initialDelay = 350;
+  const periodMs = () => Math.max(16, 1000 / (anim?.fps || 24));  // tempo de produção
+  const stop = () => {
+    active = false;
+    if (initialTimer) { clearTimeout(initialTimer); initialTimer = null; }
+    if (holdTimer)   { clearInterval(holdTimer);   holdTimer = null; }
+    btn.classList.remove('holding');
+  };
+  const step = () => {                       // 1 passo; devolve false se não pode ou chegou ao limite
+    if (!anim || edMode) return false;
+    stepFrame(dir);
+    return !((dir < 0 && curFrame <= 0) || (dir > 0 && curFrame >= anim.N - 1));
+  };
+  btn.addEventListener('pointerdown', e => {
+    e.preventDefault();                       // evita selecionar texto/ícone
+    try { btn.setPointerCapture(e.pointerId); } catch {}   // pointerup chega mesmo se sair do botão
+    active = true;
+    btn.classList.add('holding');
+    if (!step()) { stop(); return; }          // já estava no limite: nada a fazer
+    initialTimer = setTimeout(() => {
+      if (!active) return;
+      holdTimer = setInterval(() => {
+        if (!active) return;
+        if (!step()) stop();                  // parou no limite
+      }, periodMs());
+    }, initialDelay);
+  });
+  btn.addEventListener('pointerup', stop);
+  btn.addEventListener('pointercancel', stop);
+  btn.addEventListener('lostpointercapture', stop);
+  // Fallback de teclado (Enter/Espaço no botão focado): e.detail === 0
+  btn.addEventListener('click', e => { if (e.detail === 0) stepFrame(dir); });
+}
+attachHoldRepeat($('edPrev'), -1);
+attachHoldRepeat($('edNext'), 1);
 $('edToggle').addEventListener('click', () => { const b = $('edBody'); const hid = b.style.display === 'none'; b.style.display = hid ? '' : 'none'; $('edToggle').textContent = hid ? '–' : '+'; });
 $('edSetA').addEventListener('click', () => { if (!anim) return; sel.a = curFrame; if (sel.b == null || sel.b < sel.a) sel.b = sel.a; updateRangeLabel(); drawStrip(); });
 $('edSetB').addEventListener('click', () => { if (!anim) return; sel.b = curFrame; if (sel.a == null) sel.a = sel.b; if (sel.a > sel.b) [sel.a, sel.b] = [sel.b, sel.a]; updateRangeLabel(); drawStrip(); });
